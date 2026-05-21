@@ -1,6 +1,6 @@
 # BLE LED Bridge
 
-Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/Alexa. El ESP32 se conecta al controlador BLE (MAC `BE:58:BC:00:16:DB`), expone un dashboard web responsivo y emula un dispositivo compatible con Alexa mediante `fauxmoESP`, así puedes encender, apagar y restaurar el último color sin abrir más apps.
+Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/Alexa. El ESP32 se conecta al controlador BLE (dirección detectada mediante escaneo local), expone un dashboard web responsivo y emula un dispositivo compatible con Alexa mediante `fauxmoESP`, así puedes encender, apagar y restaurar el último color sin abrir más apps.
 
 ## Características actuales
 - Conexión BLE con controladores genéricos (servicio `FFF0`, característica `FFF3`).
