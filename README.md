@@ -4,11 +4,10 @@ Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/A
 
 ## Características actuales
 - Conexión BLE con controladores genéricos (servicio `FFF0`, característica `FFF3`).
-- Servidor HTTP (`http://<IP>:81`) con selector de color, brillo y feedback en tiempo real.
-- HTTP API (`/api/color`, `/api/status`) para scripts o automatizaciones.
-- LED azul integrado indica que Wi-Fi + BLE están conectados.
-- Emulación de dispositivo Alexa (`Tira LED`) para encender/apagar y recuperar la escena previa.
-- Registro periódido cada 5 s con la IP y estado Wi-Fi/BLE.
+- Dashboard `http://<IP>:81` con selector de color, brillo y preset de escenarios rápidos.
+- HTTP API (`/api/color`, `/api/status`) para scripts automáticos.
+- Alexa emulada (`Tira LED`) que responde a on/off y a colores (puedes decir “pon la luz led azul”).
+- LED azul integrado indica que Wi-Fi + BLE están conectados y el log serie reporta estado cada 5 s.
 
 ## Primeros pasos
 1. Asegúrate de tener PlatformIO instalado y el ESP32 conectado por USB.
@@ -38,12 +37,13 @@ Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/A
   ```
 - Estado de conexión: `http://<IP>:81/api/status` (`{"connected":true/false}`).
 
-## Alexa
-1. Asegúrate de que el ESP y el Echo estén en la misma red Wi-Fi.
+## Control de color con Alexa
+1. Asegúrate de que el ESP está en `FLIAMEJIA` y el LED azul del ESP se mantenga encendido.
 2. En la app Alexa, agrega un dispositivo → “Otro” → “Wi-Fi”.
-3. Durante el descubrimiento el ESP anuncia `Tira LED`; así que simplemente selecciónalo.
-4. Luego puedes decir “Alexa, enciende Tira LED” (restaura el último color) o “Alexa, apaga Tira LED” (envía 0,0,0).
-5. Para cambiar colores específicos con Alexa puedes crear una rutina que llame al endpoint `/api/color` usando un servicio intermedio (IFTTT, webhook, etc.).
+3. El ESP anuncia el dispositivo `Tira LED` y lo descubres como una luz estándar.
+4. Di frases como “Alexa, pon la luz led azul” o cualquier color que Alexa entienda: el color se traduce a RGB y se envía directamente por BLE.
+5. “Alexa, enciende Tira LED” restituye el último color, mientras que “Alexa, apaga Tira LED” manda `0,0,0`.
+6. Si quieres escenas adicionales (atardecer, cine), crea una rutina que llame a `/api/color` con los valores preferidos.
 
 ## Estado actual y próximos pasos
 - BLE → Wi-Fi → Alexa: completado. El LED azul monitorea el stack.

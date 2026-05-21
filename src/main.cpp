@@ -12,6 +12,7 @@
 BLEControl ledController;
 AsyncWebServer server(81);
 fauxmoESP fauxmo;
+Preferences prefs;
 
 struct LedState {
     uint8_t red;
@@ -19,47 +20,62 @@ struct LedState {
     uint8_t blue;
     uint8_t brightness;
 };
-LedState lastState{255, 0, 0, 0xff};
+LedState lastState{ 255, 0, 0, 0xFF };
+bool alexaPower = true;
 
-bool alexaPower = false;
-
-static constexpr int STATUS_LED_PIN = 2; // LED azul incorporado en muchos ESP32
+static constexpr int STATUS_LED_PIN = 2;
 static unsigned long lastStatusLog = 0;
-static const unsigned long STATUS_INTERVAL_MS = 5000;
+static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
 
 static const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>LED Bridge</title>
     <style>
-        body{font-family:system-ui, -apple-system, sans-serif; background:linear-gradient(135deg,#101010,#1f1f2d); color:#f0f0f5; display:flex; flex-direction:column; align-items:center; min-height:100vh; margin:0; padding:2rem 1rem;}
-        h1{margin-bottom:.4rem;}
-        .card{background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:1.5rem; width:100%; max-width:420px; box-shadow:0 25px 40px rgba(0,0,0,.35);}
-        label{display:block; font-size:.85rem; letter-spacing:.05em; text-transform:uppercase; color:#9aa0bd; margin-top:1rem;}
-        input[type=color]{width:100%; height:68px; border:none; background:transparent; cursor:pointer;}
-        button{width:100%; margin-top:1.2rem; border:none; background:#ff6a00; color:#fff; padding:.9rem; border-radius:999px; font-size:1rem; font-weight:600; cursor:pointer; transition:background .2s ease;}
-        button:active{background:#e25c00;}
-        .status{margin-top:1rem; font-size:.9rem; color:#c1d1ff;}
-        .row{display:flex; align-items:center; gap:1rem; margin-top:.8rem;}
-        .row input[type=range]{flex:1;}
-        .note{margin-top:.4rem; font-size:.75rem; color:#7b869f;}
+        :root {
+            color-scheme: dark;
+        }
+        body {font-family:'Space Grotesk', system-ui, -apple-system, sans-serif; background: radial-gradient(circle at top, rgba(0,104,201,.35), transparent 40%), #05030b; color:#f8fbff; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; padding:1.5rem;}
+        .card{width:100%; max-width:420px; background:rgba(8,10,25,.9); border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:2rem; box-shadow:0 30px 40px rgba(0,0,0,.65); backdrop-filter:blur(20px);}
+        h1{margin:0 0 .25rem; font-size:1.9rem; letter-spacing:.05em;}
+        p.note{margin:0 0 1.2rem; color:#9aa0bd; font-size:.9rem;}
+        label{display:block; font-size:.8rem; letter-spacing:.2em; text-transform:uppercase; color:#5a6c8c; margin-top:1.1rem;}
+        input[type=color]{width:100%; height:72px; border:none; border-radius:18px; cursor:pointer;}
+        .row{display:flex; align-items:center; gap:1rem; margin-top:.5rem;}
+        input[type=range]{width:100%;}
+        button{width:100%; margin-top:1.3rem; border:none; background:linear-gradient(135deg,#1e64ff,#00d4ff); color:#fff; padding:.85rem 1rem; border-radius:999px; font-size:1rem; font-weight:600; letter-spacing:.05em; cursor:pointer; transition:transform .2s ease, box-shadow .2s ease; box-shadow:0 12px 30px -12px rgba(0,212,255,.9);} 
+        button:active{transform:translateY(2px); box-shadow:0 10px 20px -10px rgba(0,212,255,.8);}
+        .status{margin-top:1rem; font-size:.85rem; color:#bedeff;}
+        .presets{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin-top:1.5rem;}
+        .preset{border:none; border-radius:14px; padding:.9rem; font-weight:600; letter-spacing:.05em; text-transform:uppercase; font-size:.75rem; cursor:pointer; transition:transform .2s ease;}
+        .preset:active{transform:translateY(2px);}
+        .preset[data-color="0,102,255"]{background:#0f5fff; color:#fff;}
+        .preset[data-color="102,255,255"]{background:#02c8ff; color:#04132b;}
+        .preset[data-color="0,255,102"]{background:#00ff9d; color:#02140c;}
+        .preset[data-color="255,255,255"]{background:#fff; color:#010101;}
+        .alexa-note{margin-top:1.5rem; font-size:.78rem; color:#7b86a9; text-align:center;}
     </style>
 </head>
 <body>
     <div class="card">
         <h1>LED Bridge</h1>
-        <p class="note">Controla tu tira RGB desde el navegador o Alexa.</p>
+        <p class="note">Controla tu tira RGB desde el navegador, Alexa o presets rápidos.</p>
         <label for="color">Elige color</label>
         <input type="color" id="color" value="#ff6a00" />
         <label for="brightness">Brillo (<span id="brightness-value">100</span>%)</label>
-        <div class="row">
-            <input type="range" id="brightness" min="10" max="100" value="100" />
-        </div>
+        <div class="row"><input type="range" id="brightness" min="10" max="100" value="100" /></div>
         <button id="apply">Aplicar color</button>
-        <div class="status" id="status">Conectando al LED...</div>
+        <div class="status" id="status">Conectando al controlador...</div>
+        <div class="presets">
+            <button class="preset" data-color="0,102,255">Azul Neón</button>
+            <button class="preset" data-color="102,255,255">Ciclo Marino</button>
+            <button class="preset" data-color="0,255,102">Verde Futuro</button>
+            <button class="preset" data-color="255,255,255">Blanco Puro</button>
+        </div>
+        <p class="alexa-note">Alexa entiende comandos de color como “pon la luz led azul” y restaura cada escena al encender.</p>
     </div>
 
     <script>
@@ -72,16 +88,29 @@ static const char index_html[] PROGMEM = R"rawliteral(
             brightnessValue.textContent = brightnessSlider.value;
         });
 
-        document.getElementById('apply').addEventListener('click', async () => {
+        async function sendColorCommand(red, green, blue, brightness) {
+            const response = await fetch(`/api/color?red=${red}&green=${green}&blue=${blue}&brightness=${brightness}`);
+            const data = await response.json();
+            status.textContent = data.message + (data.success ? ' • Estado OK' : ' • Revisar LED');
+        }
+
+        document.getElementById('apply').addEventListener('click', () => {
             const hex = colorPicker.value;
             const red = parseInt(hex.substring(1, 3), 16);
             const green = parseInt(hex.substring(3, 5), 16);
             const blue = parseInt(hex.substring(5, 7), 16);
             const brightness = Math.round((parseInt(brightnessSlider.value) / 100) * 0xff);
+            sendColorCommand(red, green, blue, brightness);
+        });
 
-            const response = await fetch(`/api/color?red=${red}&green=${green}&blue=${blue}&brightness=${brightness}`);
-            const text = await response.json();
-            status.textContent = text.message + (text.success ? ' • Estado OK' : ' • Revisar LED');
+        document.querySelectorAll('.preset').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const [r, g, b] = btn.dataset.color.split(',').map(Number);
+                brightnessSlider.value = 100;
+                brightnessValue.textContent = 100;
+                colorPicker.value = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+                sendColorCommand(r, g, b, 0xff);
+            });
         });
 
         async function refreshStatus() {
@@ -109,25 +138,48 @@ static int clampColorParam(AsyncWebServerRequest* request, const char* name) {
     return constrain(value, 0, 255);
 }
 
-bool applyColor(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bool updateState = true) {
-    if (ledController.sendColor(red, green, blue, brightness)) {
-        if (updateState) {
-            lastState.red = red;
-            lastState.green = green;
-            lastState.blue = blue;
-            lastState.brightness = brightness;
-        }
-        return true;
-    }
-    return false;
+void saveState() {
+    prefs.putUChar("red", lastState.red);
+    prefs.putUChar("green", lastState.green);
+    prefs.putUChar("blue", lastState.blue);
+    prefs.putUChar("brightness", lastState.brightness);
+    prefs.putBool("power", alexaPower);
 }
 
-void handleAlexaDevice(bool state) {
+void loadState() {
+    prefs.begin("led", false);
+    lastState.red = prefs.getUChar("red", 255);
+    lastState.green = prefs.getUChar("green", 0);
+    lastState.blue = prefs.getUChar("blue", 0);
+    lastState.brightness = prefs.getUChar("brightness", 0xFF);
+    alexaPower = prefs.getBool("power", true);
+}
+
+bool applyColor(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bool updateState = true) {
+    const bool success = ledController.sendColor(red, green, blue, brightness);
+    if (success && updateState) {
+        lastState.red = red;
+        lastState.green = green;
+        lastState.blue = blue;
+        lastState.brightness = brightness;
+        alexaPower = true;
+        saveState();
+    }
+    return success;
+}
+
+void handleAlexaCommand(bool state, unsigned char brightness, byte* rgb) {
     alexaPower = state;
-    if (state) {
-        applyColor(lastState.red, lastState.green, lastState.blue, lastState.brightness, false);
-    } else {
+    prefs.putBool("power", state);
+    if (!state) {
         ledController.sendColor(0, 0, 0, 0x10);
+        return;
+    }
+    uint8_t effectiveBrightness = brightness ? brightness : lastState.brightness;
+    if (rgb) {
+        applyColor(rgb[0], rgb[1], rgb[2], effectiveBrightness);
+    } else {
+        applyColor(lastState.red, lastState.green, lastState.blue, effectiveBrightness);
     }
 }
 
@@ -154,6 +206,8 @@ void setup() {
         Serial.println("\nNo fue posible establecer WiFi");
     }
 
+    loadState();
+
     ledController.begin();
     ledController.configure(BLE_CONTROLLER_ADDRESS, BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
 
@@ -165,19 +219,12 @@ void setup() {
         const int red = clampColorParam(request, "red");
         const int green = clampColorParam(request, "green");
         const int blue = clampColorParam(request, "blue");
-        int brightness = 0xff;
-
+        int brightness = 0xFF;
         if (request->hasParam("brightness")) {
             brightness = constrain(request->getParam("brightness")->value().toInt(), 0, 255);
         }
-
         const bool success = applyColor(red, green, blue, brightness);
-        const String message = success ? "Color enviado" : "Error BLE";
-        if (success && alexaPower) {
-            // keep Alexa state consistent
-            alexaPower = true;
-        }
-        request->send(200, "application/json", buildJson(success, message));
+        request->send(200, "application/json", buildJson(success, success ? "Color enviado" : "Error BLE"));
     });
 
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -197,8 +244,17 @@ void setup() {
     fauxmo.enable(true);
     fauxmo.addDevice("Tira LED");
     fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value) {
-        handleAlexaDevice(state);
+        handleAlexaCommand(state, value, nullptr);
     });
+    fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value, byte* rgb) {
+        handleAlexaCommand(state, value, rgb);
+    });
+
+    if (alexaPower) {
+        applyColor(lastState.red, lastState.green, lastState.blue, lastState.brightness);
+    } else {
+        ledController.sendColor(0, 0, 0, 0x10);
+    }
 }
 
 void loop() {
