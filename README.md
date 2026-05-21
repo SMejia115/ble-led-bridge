@@ -4,9 +4,9 @@ Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/A
 
 ## Características actuales
 - Conexión BLE con controladores genéricos (servicio `FFF0`, característica `FFF3`).
-- Dashboard `http://<IP>:81` con selector de color, brillo y preset de escenarios rápidos.
-- HTTP API (`/api/color`, `/api/status`) para scripts automáticos.
-- Alexa emulada (`Tira LED`) que responde a on/off y a colores (puedes decir “pon la luz led azul”).
+- Dashboard `http://<IP>:81` con selector de color, brillo, presets y efectos (ritmo, policía, estroboscópico).
+- HTTP API (`/api/color`, `/api/status`, `/api/effect`) para scripts automáticos o rutinas Alexa.
+- Alexa emulada (`Tira LED`) responde a on/off y a colores (“pon la luz led azul”).
 - LED azul integrado indica que Wi-Fi + BLE están conectados y el log serie reporta estado cada 5 s.
 
 ## Primeros pasos

@@ -4,6 +4,10 @@
 #include <AsyncTCP.h>
 #include <Preferences.h>
 #include <fauxmoESP.h>
+#include <algorithm>
+#include <cmath>
+#include <string>
+#include <cctype>
 
 #include "wifi_settings.h"
 #include "controller_settings.h"
@@ -20,8 +24,20 @@ struct LedState {
     uint8_t blue;
     uint8_t brightness;
 };
-LedState lastState{ 255, 0, 0, 0xFF };
+LedState lastState{255, 0, 0, 0xFF};
 bool alexaPower = true;
+
+enum class EffectType { NONE, MUSIC, POLICE, STROBE };
+
+struct EffectState {
+    EffectType type = EffectType::NONE;
+    unsigned long nextChange = 0;
+    unsigned long interval = 200;
+    unsigned long endTime = 0;
+    int step = 0;
+    bool toggle = false;
+};
+EffectState effect;
 
 static constexpr int STATUS_LED_PIN = 2;
 static unsigned long lastStatusLog = 0;
@@ -75,7 +91,13 @@ static const char index_html[] PROGMEM = R"rawliteral(
             <button class="preset" data-color="0,255,102">Verde Futuro</button>
             <button class="preset" data-color="255,255,255">Blanco Puro</button>
         </div>
-        <p class="alexa-note">Alexa entiende comandos de color como “pon la luz led azul” y restaura cada escena al encender.</p>
+        <div class="effects">
+            <button class="effect" data-effect="music">Al ritmo</button>
+            <button class="effect" data-effect="police">Luces de policía</button>
+            <button class="effect" data-effect="strobe">Estroboscópico</button>
+            <button class="effect" data-effect="stop">Detener</button>
+        </div>
+        <p class="alexa-note">Alexa entiende comandos de color como “pon la luz led azul”, y puedes añadir rutinas HTTP para efectos más complejos.</p>
     </div>
 
     <script>
@@ -110,6 +132,17 @@ static const char index_html[] PROGMEM = R"rawliteral(
                 brightnessValue.textContent = 100;
                 colorPicker.value = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
                 sendColorCommand(r, g, b, 0xff);
+            });
+        });
+
+        document.querySelectorAll('.effect').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const effect = btn.dataset.effect;
+                fetch(`/api/effect?name=${effect}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        status.textContent = data.message;
+                    });
             });
         });
 
@@ -155,9 +188,47 @@ void loadState() {
     alexaPower = prefs.getBool("power", true);
 }
 
+void stopEffect() {
+    effect.type = EffectType::NONE;
+}
+
+void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
+    float hh = h / 60.0f;
+    int i = floor(hh);
+    float f = hh - i;
+    float p = v * (1 - s / 255.0f);
+    float q = v * (1 - f * s / 255.0f);
+    float t = v * (1 - (1 - f) * s / 255.0f);
+    float r, g, b;
+    auto clampVal = [](float v) -> uint8_t {
+        return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, v)));
+    };
+    switch (i % 6) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        case 5: default: r = v; g = p; b = q; break;
+    }
+    out_r = clampVal(r);
+    out_g = clampVal(g);
+    out_b = clampVal(b);
+}
+
+void startEffect(EffectType type, unsigned long duration, unsigned long interval) {
+    effect.type = type;
+    effect.interval = interval ? interval : 200;
+    effect.nextChange = millis();
+    effect.endTime = duration ? millis() + duration : 0;
+    effect.step = 0;
+    effect.toggle = false;
+}
+
 bool applyColor(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bool updateState = true) {
     const bool success = ledController.sendColor(red, green, blue, brightness);
     if (success && updateState) {
+        stopEffect();
         lastState.red = red;
         lastState.green = green;
         lastState.blue = blue;
@@ -166,6 +237,47 @@ bool applyColor(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bo
         saveState();
     }
     return success;
+}
+
+void updateEffect() {
+    if (effect.type == EffectType::NONE) {
+        return;
+    }
+    const unsigned long now = millis();
+    if (effect.endTime && now >= effect.endTime) {
+        stopEffect();
+        return;
+    }
+    if (now < effect.nextChange) {
+        return;
+    }
+    effect.nextChange = now + effect.interval;
+    uint8_t r = 0, g = 0, b = 0;
+    switch (effect.type) {
+        case EffectType::MUSIC:
+            effect.step = (effect.step + 15) % 360;
+            hsvToRgb(effect.step, 255, 255, r, g, b);
+            applyColor(r, g, b, 0xFF, false);
+            break;
+        case EffectType::POLICE:
+            effect.toggle = !effect.toggle;
+            if (effect.toggle) {
+                applyColor(255, 0, 0, 0xFF, false);
+            } else {
+                applyColor(0, 0, 255, 0xFF, false);
+            }
+            break;
+        case EffectType::STROBE:
+            effect.toggle = !effect.toggle;
+            if (effect.toggle) {
+                applyColor(255, 255, 255, 0xFF, false);
+            } else {
+                applyColor(0, 0, 0, 0x00, false);
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 void handleAlexaCommand(bool state, unsigned char brightness, byte* rgb) {
@@ -233,6 +345,32 @@ void setup() {
         request->send(200, "application/json", body);
     });
 
+    server.on("/api/effect", HTTP_GET, [](AsyncWebServerRequest* request) {
+        const char* nameParam = request->hasParam("name") ? request->getParam("name")->value().c_str() : "";
+        const std::string name(nameParam);
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return std::tolower(c); });
+        unsigned long duration = request->hasParam("duration") ? request->getParam("duration")->value().toInt() : 15000;
+        unsigned long speed = request->hasParam("speed") ? request->getParam("speed")->value().toInt() : 200;
+        std::string message;
+        if (lower == "stop" || lower.empty()) {
+            stopEffect();
+            message = "Efecto detenido";
+        } else {
+            EffectType type = EffectType::NONE;
+            if (lower == "music") type = EffectType::MUSIC;
+            else if (lower == "police") type = EffectType::POLICE;
+            else if (lower == "strobe") type = EffectType::STROBE;
+            if (type == EffectType::NONE) {
+                message = "Efecto desconocido";
+            } else {
+                startEffect(type, duration, speed);
+                message = "Efecto " + lower + " activado";
+            }
+        }
+        request->send(200, "application/json", buildJson(true, String(message.c_str())));
+    });
+
     server.onNotFound([](AsyncWebServerRequest* request) {
         request->send(404, "text/plain", "Not found");
     });
@@ -275,6 +413,7 @@ void loop() {
                       bleReady ? "OK" : "NO");
     }
 
+    updateEffect();
     fauxmo.handle();
     delay(1000);
 }

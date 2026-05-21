@@ -6,6 +6,7 @@
 4. **Integración Alexa**: añadí `fauxmoESP` para emular el dispositivo “Tira LED”, con control de encendido/apagado y restauración del último color.
 5. **Refactor y limpieza**: renombré la carpeta a `ble-led-bridge`, eliminé duplicados, añadí README con instrucciones y generé este log para documentar el avance.
 6. **Alexa + color**: actualicé `main.cpp` para guardar el estado en `Preferences`, añadí presets web, permití la frase “Alexa, pon la luz led azul” y convertí los datos de color enviados por Alexa a comandos RGB BLE.
+7. **Efectos dinámicos**: añadí botones/endpoint `/api/effect` para activar efectos de música, policía o estroboscópico y actualicé el loop para ejecutarlos sin bloquear.
 
 ## Qué sigue
 - Crear presets de color en el dashboard y/o rutinas de Alexa que disparen `/api/color`.
