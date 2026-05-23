@@ -33,6 +33,7 @@ static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
 static unsigned long indicatorStart = 0;
 static constexpr unsigned long INDICATOR_DURATION = 10000;
 static bool indicatorActive = false;
+static bool indicatorShown = false;
 
 enum class EffectType { NONE, MUSIC, POLICE, STROBE };
 
@@ -407,16 +408,24 @@ void loop() {
 
     const bool wifiReady = (WiFi.status() == WL_CONNECTED);
     const bool bleReady = ledController.isConnected();
-    if (wifiReady && bleReady && !indicatorActive) {
+    const bool connected = wifiReady && bleReady;
+    if (!connected) {
+        digitalWrite(STATUS_LED_PIN, LOW);
+        digitalWrite(AUX_LED_PIN, LOW);
+        indicatorActive = false;
+        indicatorShown = false;
+    } else if (!indicatorShown) {
         digitalWrite(STATUS_LED_PIN, HIGH);
         digitalWrite(AUX_LED_PIN, HIGH);
         indicatorActive = true;
+        indicatorShown = true;
         indicatorStart = millis();
     }
     if (indicatorActive && (millis() - indicatorStart) >= INDICATOR_DURATION) {
         digitalWrite(STATUS_LED_PIN, LOW);
         digitalWrite(AUX_LED_PIN, LOW);
         indicatorActive = false;
+        indicatorShown = false;
     }
 
     const unsigned long now = millis();
