@@ -34,6 +34,7 @@ static unsigned long indicatorStart = 0;
 static constexpr unsigned long INDICATOR_DURATION = 10000;
 static bool indicatorActive = false;
 static bool indicatorShown = false;
+static bool indicatorDone = false;
 
 enum class EffectType { NONE, MUSIC, POLICE, STROBE };
 
@@ -414,7 +415,8 @@ void loop() {
         digitalWrite(AUX_LED_PIN, LOW);
         indicatorActive = false;
         indicatorShown = false;
-    } else if (!indicatorShown) {
+        indicatorDone = false;
+    } else if (!indicatorShown && !indicatorDone) {
         digitalWrite(STATUS_LED_PIN, HIGH);
         digitalWrite(AUX_LED_PIN, HIGH);
         indicatorActive = true;
@@ -425,7 +427,7 @@ void loop() {
         digitalWrite(STATUS_LED_PIN, LOW);
         digitalWrite(AUX_LED_PIN, LOW);
         indicatorActive = false;
-        indicatorShown = false;
+        indicatorDone = true;
     }
 
     const unsigned long now = millis();
