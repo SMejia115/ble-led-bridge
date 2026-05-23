@@ -26,6 +26,13 @@ struct LedState {
 };
 LedState lastState{255, 0, 0, 0xFF};
 bool alexaPower = true;
+static constexpr int STATUS_LED_PIN = 2;
+static constexpr int AUX_LED_PIN = 5;
+static unsigned long lastStatusLog = 0;
+static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
+static unsigned long indicatorStart = 0;
+static constexpr unsigned long INDICATOR_DURATION = 10000;
+static bool indicatorActive = false;
 
 enum class EffectType { NONE, MUSIC, POLICE, STROBE };
 
@@ -38,10 +45,6 @@ struct EffectState {
     bool toggle = false;
 };
 EffectState effect;
-
-static constexpr int STATUS_LED_PIN = 2;
-static unsigned long lastStatusLog = 0;
-static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
 
 static const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -302,7 +305,9 @@ void setup() {
     Serial.print("Iniciando WiFi");
 
     pinMode(STATUS_LED_PIN, OUTPUT);
+    pinMode(AUX_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
+    digitalWrite(AUX_LED_PIN, LOW);
 
     uint8_t attempt = 0;
     while (WiFi.status() != WL_CONNECTED && attempt++ < 20) {
@@ -402,7 +407,17 @@ void loop() {
 
     const bool wifiReady = (WiFi.status() == WL_CONNECTED);
     const bool bleReady = ledController.isConnected();
-    digitalWrite(STATUS_LED_PIN, (wifiReady && bleReady) ? HIGH : LOW);
+    if (wifiReady && bleReady && !indicatorActive) {
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        digitalWrite(AUX_LED_PIN, HIGH);
+        indicatorActive = true;
+        indicatorStart = millis();
+    }
+    if (indicatorActive && (millis() - indicatorStart) >= INDICATOR_DURATION) {
+        digitalWrite(STATUS_LED_PIN, LOW);
+        digitalWrite(AUX_LED_PIN, LOW);
+        indicatorActive = false;
+    }
 
     const unsigned long now = millis();
     if (now - lastStatusLog >= STATUS_INTERVAL_MS) {

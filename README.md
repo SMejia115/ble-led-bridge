@@ -7,7 +7,7 @@ Proyecto que convierte un ESP32 en puente entre una tira RGB BLE y redes Wi-Fi/A
 - Dashboard `http://<IP>:81` con selector de color, brillo, presets y efectos (ritmo, policía, estroboscópico).
 - HTTP API (`/api/color`, `/api/status`, `/api/effect`) para scripts automáticos o rutinas Alexa.
 - Alexa emulada (`Tira LED`) responde a on/off y a colores (“pon la luz led azul”).
-- LED azul integrado indica que Wi-Fi + BLE están conectados y el log serie reporta estado cada 5 s.
+- LED azul integrado (y un auxiliar) indican que la conexión Wi-Fi+BLE se estableció, pero se apagan automáticamente tras 10 s para evitar molestias.
 
 ## Primeros pasos
 1. Asegúrate de tener PlatformIO instalado y el ESP32 conectado por USB.
