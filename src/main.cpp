@@ -1,22 +1,35 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include <Preferences.h>
+#include <WebServer.h>
 #include <fauxmoESP.h>
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <cctype>
 
-#include "wifi_settings.h"
 #include "controller_settings.h"
 #include "ble_control.h"
 
 BLEControl ledController;
-AsyncWebServer server(81);
+AsyncWebServer appServer(81);
+WebServer setupServer(80);
 fauxmoESP fauxmo;
 Preferences prefs;
+
+static constexpr char WIFI_PREF_NS[] = "wifi";
+static constexpr char STATE_PREF_NS[] = "led";
+static constexpr char HOSTNAME[] = "led-bridge";
+static constexpr char AP_SSID[] = "LED-Bridge-Setup";
+static constexpr int STATUS_LED_PIN = 2;
+static constexpr int AUX_LED_PIN = 5;
+static constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+static constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
+static constexpr unsigned long INDICATOR_DURATION = 10000;
 
 struct LedState {
     uint8_t red;
@@ -26,15 +39,22 @@ struct LedState {
 };
 LedState lastState{255, 0, 0, 0xFF};
 bool alexaPower = true;
-static constexpr int STATUS_LED_PIN = 2;
-static constexpr int AUX_LED_PIN = 5;
 static unsigned long lastStatusLog = 0;
-static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
 static unsigned long indicatorStart = 0;
-static constexpr unsigned long INDICATOR_DURATION = 10000;
 static bool indicatorActive = false;
 static bool indicatorShown = false;
 static bool indicatorDone = false;
+static bool wifiSetupMode = false;
+static bool wifiConnected = false;
+static unsigned long wifiRetryAt = 0;
+static bool restartPending = false;
+static unsigned long restartAt = 0;
+
+struct WifiCredentials {
+    String ssid;
+    String password;
+    bool valid() const { return ssid.length() > 0; }
+};
 
 enum class EffectType { NONE, MUSIC, POLICE, STROBE };
 
@@ -168,6 +188,11 @@ static String buildJson(bool success, const String& message) {
     return String("{\"success\":") + (success ? "true" : "false") + ",\"message\":\"" + message + "\"}";
 }
 
+static String buildJsonStatus(bool connected, const String& ip, const String& mode) {
+    return String("{\"connected\":") + (connected ? "true" : "false") +
+           ",\"ip\":\"" + ip + "\",\"mode\":\"" + mode + "\"}";
+}
+
 static int clampColorParam(AsyncWebServerRequest* request, const char* name) {
     if (!request->hasParam(name)) {
         return 0;
@@ -176,21 +201,172 @@ static int clampColorParam(AsyncWebServerRequest* request, const char* name) {
     return constrain(value, 0, 255);
 }
 
+static WifiCredentials loadWifiCredentials() {
+    WifiCredentials creds;
+    prefs.begin(WIFI_PREF_NS, false);
+    creds.ssid = prefs.getString("ssid", "");
+    creds.password = prefs.getString("password", "");
+    prefs.end();
+    return creds;
+}
+
+static void saveWifiCredentials(const String& ssid, const String& password) {
+    prefs.begin(WIFI_PREF_NS, false);
+    prefs.putString("ssid", ssid);
+    prefs.putString("password", password);
+    prefs.end();
+}
+
+static void clearWifiCredentials() {
+    prefs.begin(WIFI_PREF_NS, false);
+    prefs.clear();
+    prefs.end();
+}
+
+static String setupPage() {
+    return R"rawliteral(
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LED Bridge Setup</title>
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;background:#0c1020;color:#f5f7ff;margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
+    .card{width:100%;max-width:420px;background:#121831;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:24px}
+    h1{margin:0 0 8px}
+    label{display:block;margin-top:14px;font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:#93a4d9}
+    input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#0a0f1f;color:#fff;margin-top:8px}
+    button,a{display:inline-block;width:100%;margin-top:16px;padding:12px 14px;border:0;border-radius:999px;background:#4b7bff;color:#fff;text-align:center;text-decoration:none;font-weight:700}
+    .small{font-size:13px;color:#9aa8d5;line-height:1.5}
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/setup/save">
+    <h1>LED Bridge</h1>
+    <p class="small">Conecta el dispositivo a tu Wi-Fi. Si ya cambiaste de red, borra credenciales con el boton fisico y vuelve a configurar.</p>
+    <label for="ssid">SSID</label>
+    <input id="ssid" name="ssid" autocomplete="off" required />
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="off" />
+    <button type="submit">Guardar y conectar</button>
+  </form>
+</body>
+</html>
+)rawliteral";
+}
+
+static void updateIndicatorsForWifi(bool connected) {
+    digitalWrite(STATUS_LED_PIN, connected ? HIGH : LOW);
+    digitalWrite(AUX_LED_PIN, connected ? HIGH : LOW);
+}
+
+static void startApSetup() {
+    wifiSetupMode = true;
+    wifiConnected = false;
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_AP);
+    IPAddress apIp(192, 168, 4, 1);
+    IPAddress apGateway(192, 168, 4, 1);
+    IPAddress apSubnet(255, 255, 255, 0);
+    WiFi.softAPConfig(apIp, apGateway, apSubnet);
+    WiFi.softAP(AP_SSID);
+    Serial.println("Modo setup WiFi activo");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.print("Clientes AP: ");
+    Serial.println(WiFi.softAPgetStationNum());
+}
+
+static bool startStationFromSavedCredentials() {
+    WifiCredentials creds = loadWifiCredentials();
+    if (!creds.valid()) {
+        return false;
+    }
+
+    wifiSetupMode = false;
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(HOSTNAME);
+    WiFi.begin(creds.ssid.c_str(), creds.password.c_str());
+
+    Serial.print("Conectando a WiFi guardado");
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(250);
+        Serial.print('.');
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        WiFi.setAutoReconnect(true);
+        WiFi.persistent(true);
+        if (MDNS.begin(HOSTNAME)) {
+            MDNS.addService("http", "tcp", 81);
+        }
+        Serial.print("WiFi conectado. IP: ");
+        Serial.println(WiFi.localIP());
+        return true;
+    }
+
+    Serial.println("No fue posible establecer WiFi; pasando a modo setup");
+    WiFi.disconnect(true);
+    startApSetup();
+    return false;
+}
+
+static void handleWifiReconnect() {
+    if (wifiSetupMode) {
+        return;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        if (!wifiConnected) {
+            wifiConnected = true;
+            if (MDNS.begin(HOSTNAME)) {
+                MDNS.addService("http", "tcp", 81);
+            }
+            Serial.print("WiFi reconectado. IP: ");
+            Serial.println(WiFi.localIP());
+        }
+        return;
+    }
+
+    wifiConnected = false;
+    if (millis() < wifiRetryAt) {
+        return;
+    }
+
+    wifiRetryAt = millis() + WIFI_RETRY_INTERVAL_MS;
+    WifiCredentials creds = loadWifiCredentials();
+    if (!creds.valid()) {
+        startApSetup();
+        return;
+    }
+
+    Serial.println("Reintentando WiFi");
+    WiFi.disconnect();
+    WiFi.begin(creds.ssid.c_str(), creds.password.c_str());
+}
+
 void saveState() {
+    prefs.begin(STATE_PREF_NS, false);
     prefs.putUChar("red", lastState.red);
     prefs.putUChar("green", lastState.green);
     prefs.putUChar("blue", lastState.blue);
     prefs.putUChar("brightness", lastState.brightness);
     prefs.putBool("power", alexaPower);
+    prefs.end();
 }
 
 void loadState() {
-    prefs.begin("led", false);
+    prefs.begin(STATE_PREF_NS, false);
     lastState.red = prefs.getUChar("red", 255);
     lastState.green = prefs.getUChar("green", 0);
     lastState.blue = prefs.getUChar("blue", 0);
     lastState.brightness = prefs.getUChar("brightness", 0xFF);
     alexaPower = prefs.getBool("power", true);
+    prefs.end();
 }
 
 void stopEffect() {
@@ -303,38 +479,43 @@ void handleAlexaCommand(bool state, unsigned char brightness, byte* rgb) {
 void setup() {
     Serial.begin(115200);
     delay(100);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    Serial.print("Iniciando WiFi");
 
     pinMode(STATUS_LED_PIN, OUTPUT);
     pinMode(AUX_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
     digitalWrite(AUX_LED_PIN, LOW);
 
-    uint8_t attempt = 0;
-    while (WiFi.status() != WL_CONNECTED && attempt++ < 20) {
-        Serial.print('.');
-        delay(500);
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi conectado");
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
-    } else {
-        Serial.println("\nNo fue posible establecer WiFi");
-    }
-
     loadState();
 
     ledController.begin();
     ledController.configure(BLE_CONTROLLER_ADDRESS, BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
 
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    setupServer.on("/", []() {
+        setupServer.send(200, "text/html", setupPage());
+    });
+
+    setupServer.on("/setup", []() {
+        setupServer.send(200, "text/html", setupPage());
+    });
+
+    setupServer.on("/setup/save", []() {
+        String ssid = setupServer.arg("ssid");
+        String password = setupServer.arg("password");
+        if (ssid.isEmpty()) {
+            setupServer.send(400, "text/plain", "SSID requerido");
+            return;
+        }
+        saveWifiCredentials(ssid, password);
+        setupServer.send(200, "text/plain", "Guardado. Reiniciando...");
+        restartPending = true;
+        restartAt = millis() + 1000;
+    });
+
+    appServer.on("/", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         request->send_P(200, "text/html", index_html);
     });
 
-    server.on("/api/color", HTTP_GET, [](AsyncWebServerRequest* request) {
+    appServer.on("/api/color", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         const int red = clampColorParam(request, "red");
         const int green = clampColorParam(request, "green");
         const int blue = clampColorParam(request, "blue");
@@ -346,13 +527,20 @@ void setup() {
         request->send(200, "application/json", buildJson(success, success ? "Color enviado" : "Error BLE"));
     });
 
-    server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
+    appServer.on("/api/status", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         const bool connected = ledController.isConnected();
-        const String body = String("{\"connected\":") + (connected ? "true" : "false") + "}";
+        const String body = buildJsonStatus(connected, wifiSetupMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString(), wifiSetupMode ? "setup" : (wifiConnected ? "station" : "reconnecting"));
         request->send(200, "application/json", body);
     });
 
-    server.on("/api/effect", HTTP_GET, [](AsyncWebServerRequest* request) {
+    appServer.on("/api/wifi", AsyncWebRequestMethod::HTTP_POST, [](AsyncWebServerRequest* request) {
+        clearWifiCredentials();
+        request->send(200, "text/plain", "Credenciales borradas. Reiniciando...");
+        restartPending = true;
+        restartAt = millis() + 1000;
+    });
+
+    appServer.on("/api/effect", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         const char* nameParam = request->hasParam("name") ? request->getParam("name")->value().c_str() : "";
         const std::string name(nameParam);
         std::string lower = name;
@@ -378,28 +566,40 @@ void setup() {
         request->send(200, "application/json", buildJson(true, String(message.c_str())));
     });
 
-    server.onNotFound([](AsyncWebServerRequest* request) {
+    setupServer.onNotFound([]() {
+        setupServer.send(404, "text/plain", "Not found");
+    });
+
+    appServer.onNotFound([](AsyncWebServerRequest* request) {
         request->send(404, "text/plain", "Not found");
     });
 
-    server.begin();
+    if (!startStationFromSavedCredentials()) {
+        startApSetup();
+    }
 
-    fauxmo.createServer(true);
-    fauxmo.setPort(80);
-    fauxmo.enable(true);
-    fauxmo.addDevice("Tira LED");
-    fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value) {
-        handleAlexaCommand(state, value, nullptr);
-    });
-    fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value, byte* rgb) {
-        handleAlexaCommand(state, value, rgb);
-    });
+    if (!wifiSetupMode) {
+        fauxmo.createServer(true);
+        fauxmo.setPort(80);
+        fauxmo.enable(true);
+        fauxmo.addDevice("Tira LED");
+        fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value) {
+            handleAlexaCommand(state, value, nullptr);
+        });
+        fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value, byte* rgb) {
+            handleAlexaCommand(state, value, rgb);
+        });
+    }
 
     if (alexaPower) {
         applyColor(lastState.red, lastState.green, lastState.blue, lastState.brightness);
     } else {
         ledController.sendColor(0, 0, 0, 0x10);
     }
+
+    setupServer.begin();
+    appServer.begin();
+    Serial.println("Servidores HTTP iniciados");
 }
 
 void loop() {
@@ -407,25 +607,24 @@ void loop() {
         ledController.sendColor(0, 0, 0, 0x10);
     }
 
+    handleWifiReconnect();
+
     const bool wifiReady = (WiFi.status() == WL_CONNECTED);
     const bool bleReady = ledController.isConnected();
     const bool connected = wifiReady && bleReady;
-    if (!connected) {
-        digitalWrite(STATUS_LED_PIN, LOW);
-        digitalWrite(AUX_LED_PIN, LOW);
+    if (!wifiReady) {
+        updateIndicatorsForWifi(false);
         indicatorActive = false;
         indicatorShown = false;
         indicatorDone = false;
     } else if (!indicatorShown && !indicatorDone) {
-        digitalWrite(STATUS_LED_PIN, HIGH);
-        digitalWrite(AUX_LED_PIN, HIGH);
+        updateIndicatorsForWifi(true);
         indicatorActive = true;
         indicatorShown = true;
         indicatorStart = millis();
     }
     if (indicatorActive && (millis() - indicatorStart) >= INDICATOR_DURATION) {
-        digitalWrite(STATUS_LED_PIN, LOW);
-        digitalWrite(AUX_LED_PIN, LOW);
+        updateIndicatorsForWifi(false);
         indicatorActive = false;
         indicatorDone = true;
     }
@@ -433,13 +632,28 @@ void loop() {
     const unsigned long now = millis();
     if (now - lastStatusLog >= STATUS_INTERVAL_MS) {
         lastStatusLog = now;
+        String ipText = "sin conexion";
+        if (wifiSetupMode) {
+            ipText = WiFi.softAPIP().toString();
+        } else if (wifiReady) {
+            ipText = WiFi.localIP().toString();
+        }
         Serial.printf("IP: %s | WiFi: %s | BLE: %s\n",
-                      wifiReady ? WiFi.localIP().toString().c_str() : "sin conexion",
+                      ipText.c_str(),
                       wifiReady ? "OK" : "NO",
                       bleReady ? "OK" : "NO");
     }
 
     updateEffect();
-    fauxmo.handle();
-    delay(1000);
+    if (!wifiSetupMode) {
+        fauxmo.handle();
+    } else {
+        setupServer.handleClient();
+    }
+
+    if (restartPending && millis() >= restartAt) {
+        ESP.restart();
+    }
+
+    delay(50);
 }
