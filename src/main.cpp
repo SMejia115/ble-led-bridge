@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
@@ -14,6 +13,8 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "controller_settings.h"
 #include "ble_control.h"
@@ -358,6 +359,17 @@ static void clearWifiCredentials() {
     prefs.end();
 }
 
+static void clearStripDefinitionsPrefs() {
+    prefs.begin(STRIP_CONFIG_NS, false);
+    prefs.clear();
+    prefs.end();
+    prefs.begin(STRIP_STATE_NS, false);
+    prefs.clear();
+    prefs.end();
+    stripDefinitions.clear();
+    strips.clear();
+}
+
 static String escapeForJson(const String& value) {
     String escaped;
     for (size_t i = 0; i < value.length(); ++i) {
@@ -551,8 +563,11 @@ static void bleScanTask(void* params) {
     vTaskDelete(nullptr);
 }
 
-static void scheduleBleScan() {
+static void scheduleBleScan(bool force = false) {
     if (bleScanInProgress) {
+        return;
+    }
+    if (!force && !wifiSetupMode && !wifiConnected) {
         return;
     }
     bleScanInProgress = true;
@@ -775,7 +790,7 @@ static void startApSetup() {
     Serial.println(WiFi.softAPIP());
     Serial.print("Clientes AP: ");
     Serial.println(WiFi.softAPgetStationNum());
-    scheduleBleScan();
+    scheduleBleScan(true);
 }
 
 static bool startStationFromSavedCredentials() {
@@ -807,6 +822,7 @@ static bool startStationFromSavedCredentials() {
         }
         Serial.print("WiFi conectado. IP: ");
         Serial.println(WiFi.localIP());
+        scheduleBleScan();
         return true;
     }
 
@@ -829,6 +845,7 @@ static void handleWifiReconnect() {
             }
             Serial.print("WiFi reconectado. IP: ");
             Serial.println(WiFi.localIP());
+            scheduleBleScan();
         }
         return;
     }
@@ -1106,6 +1123,9 @@ void setup() {
 
     appServer.on("/api/wifi", AsyncWebRequestMethod::HTTP_POST, [](AsyncWebServerRequest* request) {
         clearWifiCredentials();
+        clearStripDefinitionsPrefs();
+        bleScanResults.clear();
+        lastBleScanAt = 0;
         request->send(200, "text/plain", "Credenciales borradas. Reiniciando...");
         restartPending = true;
         restartAt = millis() + 1000;
