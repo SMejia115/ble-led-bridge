@@ -111,34 +111,44 @@ static const char index_html[] PROGMEM = R"rawliteral(
             color-scheme: dark;
         }
         body {font-family:'Space Grotesk', system-ui, -apple-system, sans-serif; background: radial-gradient(circle at top, rgba(0,104,201,.35), transparent 40%), #05030b; color:#f8fbff; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; padding:1.5rem;}
-        .card{width:100%; max-width:420px; background:rgba(8,10,25,.9); border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:2rem; box-shadow:0 30px 40px rgba(0,0,0,.65); backdrop-filter:blur(20px);}
-        h1{margin:0 0 .25rem; font-size:1.9rem; letter-spacing:.05em;}
-        p.note{margin:0 0 1.2rem; color:#9aa0bd; font-size:.9rem;}
-        label{display:block; font-size:.8rem; letter-spacing:.2em; text-transform:uppercase; color:#5a6c8c; margin-top:1.1rem;}
+        .card{width:100%; max-width:440px; background:rgba(8,10,25,.92); border:1px solid rgba(255,255,255,.08); border-radius:28px; padding:2.2rem; box-shadow:0 35px 55px rgba(0,0,0,.65); backdrop-filter:blur(26px);}
+        h1{margin:0 0 .25rem; font-size:2rem; letter-spacing:.05em;}
+        p.note{margin:0 0 1rem; color:#9aa0bd; font-size:.9rem;}
+        label{display:block; font-size:.78rem; letter-spacing:.3em; text-transform:uppercase; color:#5a6c8c; margin-top:1.2rem;}
         input[type=color]{width:100%; height:72px; border:none; border-radius:18px; cursor:pointer;}
-        .row{display:flex; align-items:center; gap:1rem; margin-top:.5rem;}
         input[type=range]{width:100%;}
-        button{width:100%; margin-top:1.3rem; border:none; background:linear-gradient(135deg,#1e64ff,#00d4ff); color:#fff; padding:.85rem 1rem; border-radius:999px; font-size:1rem; font-weight:600; letter-spacing:.05em; cursor:pointer; transition:transform .2s ease, box-shadow .2s ease; box-shadow:0 12px 30px -12px rgba(0,212,255,.9);} 
-        button:active{transform:translateY(2px); box-shadow:0 10px 20px -10px rgba(0,212,255,.8);}
-        .status{margin-top:1rem; font-size:.85rem; color:#bedeff;}
+        button{width:100%; margin-top:1.3rem; border:none; background:linear-gradient(135deg,#1e64ff,#00d4ff); color:#fff; padding:.9rem 1rem; border-radius:999px; font-size:1rem; font-weight:600; letter-spacing:.05em; cursor:pointer; transition:transform .2s ease, box-shadow .2s ease; box-shadow:0 12px 28px -14px rgba(0,212,255,.9);} 
+        button:active{transform:translateY(2px); box-shadow:0 9px 20px -10px rgba(0,212,255,.8);}
+        .status{margin-top:1rem; font-size:.85rem; color:#bedeff; min-height:1.2rem;}
+        .strip-row{display:flex; gap:.8rem; align-items:center; margin-top:.2rem; flex-wrap:wrap;}
+        select{flex:1; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:.75rem; color:#fff;}
+        .strip-status{font-size:.78rem; padding:.35rem .75rem; border-radius:999px; border:1px solid rgba(255,255,255,.15); background:rgba(255,255,255,.04);}
         .presets{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin-top:1.5rem;}
-        .preset{border:none; border-radius:14px; padding:.9rem; font-weight:600; letter-spacing:.05em; text-transform:uppercase; font-size:.75rem; cursor:pointer; transition:transform .2s ease;}
+        .preset{border:none; border-radius:14px; padding:.9rem; font-weight:600; letter-spacing:.05em; text-transform:uppercase; font-size:.75rem; cursor:pointer; background:rgba(255,255,255,.05); color:#fff; transition:transform .2s ease, box-shadow .2s ease;}
         .preset:active{transform:translateY(2px);}
-        .preset[data-color="0,102,255"]{background:#0f5fff; color:#fff;}
+        .preset[data-color="0,102,255"]{background:#0f5fff; color:#fff; box-shadow:0 12px 25px -14px rgba(15,95,255,.9);}
         .preset[data-color="102,255,255"]{background:#02c8ff; color:#04132b;}
         .preset[data-color="0,255,102"]{background:#00ff9d; color:#02140c;}
         .preset[data-color="255,255,255"]{background:#fff; color:#010101;}
+        .effects{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.65rem; margin-top:1.1rem;}
+        .effect{border:none; border-radius:12px; padding:.75rem; background:rgba(255,255,255,.08); color:#fff; font-weight:600; letter-spacing:.04em; cursor:pointer; text-transform:uppercase; font-size:.7rem; transition:transform .2s ease;}
+        .effect:active{transform:translateY(2px);}
         .alexa-note{margin-top:1.5rem; font-size:.78rem; color:#7b86a9; text-align:center;}
     </style>
 </head>
 <body>
     <div class="card">
         <h1>LED Bridge</h1>
-        <p class="note">Controla tu tira RGB desde el navegador, Alexa o presets rápidos.</p>
+        <p class="note">Controla tus tiras BLE desde el navegador, Alexa o presets rápidos.</p>
+        <label for="strip-select">Selecciona una tira</label>
+        <div class="strip-row">
+            <select id="strip-select" disabled></select>
+            <span class="strip-status" id="strip-status">Sin tiras configuradas</span>
+        </div>
         <label for="color">Elige color</label>
         <input type="color" id="color" value="#ff6a00" />
         <label for="brightness">Brillo (<span id="brightness-value">100</span>%)</label>
-        <div class="row"><input type="range" id="brightness" min="10" max="100" value="100" /></div>
+        <input type="range" id="brightness" min="10" max="100" value="100" />
         <button id="apply">Aplicar color</button>
         <div class="status" id="status">Conectando al controlador...</div>
         <div class="presets">
@@ -153,7 +163,7 @@ static const char index_html[] PROGMEM = R"rawliteral(
             <button class="effect" data-effect="strobe">Estroboscópico</button>
             <button class="effect" data-effect="stop">Detener</button>
         </div>
-        <p class="alexa-note">Alexa entiende comandos de color como “pon la luz led azul”, y puedes añadir rutinas HTTP para efectos más complejos.</p>
+        <p class="alexa-note">Alexa entiende frases como “pon la luz led azul”, y puedes combinar rutinas HTTP para escenas avanzadas.</p>
     </div>
 
     <script>
@@ -161,16 +171,86 @@ static const char index_html[] PROGMEM = R"rawliteral(
         const brightnessSlider = document.getElementById('brightness');
         const brightnessValue = document.getElementById('brightness-value');
         const status = document.getElementById('status');
+        const stripSelect = document.getElementById('strip-select');
+        const stripStatus = document.getElementById('strip-status');
+
+        let strips = [];
+
+        const toHex = (r, g, b) => `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+
+        const setSelectedStrip = (stripId) => {
+            const selected = strips.find(strip => strip.id === stripId);
+            if (!selected) {
+                stripStatus.textContent = 'Sin tiras configuradas';
+                return;
+            }
+            colorPicker.value = toHex(selected.red, selected.green, selected.blue);
+            const percent = Math.round((selected.brightness / 255) * 100);
+            brightnessSlider.value = Math.max(10, percent);
+            brightnessValue.textContent = brightnessSlider.value;
+            stripStatus.textContent = `${selected.name} • ${selected.connected ? 'BLE conectado' : 'Sin conexión BLE'} • ${selected.power ? 'Encendida' : 'Apagada'}`;
+        };
+
+        const refreshStripOptions = (list) => {
+            stripSelect.innerHTML = '';
+            list.forEach(strip => {
+                const option = document.createElement('option');
+                option.value = strip.id;
+                option.textContent = `${strip.name} (${strip.mac})`;
+                stripSelect.appendChild(option);
+            });
+            stripSelect.disabled = list.length === 0;
+            if (list.length) {
+                setSelectedStrip(parseInt(stripSelect.value, 10));
+            }
+        };
+
+        const fetchStrips = async () => {
+            try {
+                const response = await fetch('/api/strips');
+                const data = await response.json();
+                strips = data;
+                if (!strips.length) {
+                    stripStatus.textContent = 'Registra al menos una tira desde el setup';
+                    stripSelect.disabled = true;
+                    return;
+                }
+                const currentId = parseInt(stripSelect.value, 10);
+                refreshStripOptions(strips);
+                if (strips.some(strip => strip.id === currentId)) {
+                    stripSelect.value = currentId;
+                    setSelectedStrip(currentId);
+                }
+            } catch (error) {
+                stripStatus.textContent = 'No se pudieron cargar las tiras';
+            }
+        };
+
+        const getSelectedStrip = () => {
+            const stripId = parseInt(stripSelect.value, 10);
+            return strips.find(strip => strip.id === stripId);
+        };
+
+        const updateStatusMessage = (message, ok = true) => {
+            status.textContent = message;
+            status.style.color = ok ? '#bedeff' : '#ff8a8a';
+        };
+
+        const sendColorCommand = async (red, green, blue, brightness) => {
+            const strip = getSelectedStrip();
+            if (!strip) {
+                updateStatusMessage('Selecciona una tira', false);
+                return;
+            }
+            const response = await fetch(`/api/color?strip=${strip.id}&red=${red}&green=${green}&blue=${blue}&brightness=${brightness}`);
+            const data = await response.json();
+            updateStatusMessage(data.message + (data.success ? ' • Estado OK' : ' • Revisar LED'), data.success);
+            stripStatus.textContent = `${strip.name} • ${strip.connected ? 'BLE conectado' : 'Sin conexión BLE'} • ${strip.power ? 'Encendida' : 'Apagada'}`;
+        };
 
         brightnessSlider.addEventListener('input', () => {
             brightnessValue.textContent = brightnessSlider.value;
         });
-
-        async function sendColorCommand(red, green, blue, brightness) {
-            const response = await fetch(`/api/color?red=${red}&green=${green}&blue=${blue}&brightness=${brightness}`);
-            const data = await response.json();
-            status.textContent = data.message + (data.success ? ' • Estado OK' : ' • Revisar LED');
-        }
 
         document.getElementById('apply').addEventListener('click', () => {
             const hex = colorPicker.value;
@@ -186,7 +266,7 @@ static const char index_html[] PROGMEM = R"rawliteral(
                 const [r, g, b] = btn.dataset.color.split(',').map(Number);
                 brightnessSlider.value = 100;
                 brightnessValue.textContent = 100;
-                colorPicker.value = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+                colorPicker.value = toHex(r, g, b);
                 sendColorCommand(r, g, b, 0xff);
             });
         });
@@ -194,22 +274,32 @@ static const char index_html[] PROGMEM = R"rawliteral(
         document.querySelectorAll('.effect').forEach(btn => {
             btn.addEventListener('click', () => {
                 const effect = btn.dataset.effect;
-                fetch(`/api/effect?name=${effect}`)
+                const strip = getSelectedStrip();
+                if (!strip) {
+                    updateStatusMessage('Selecciona una tira', false);
+                    return;
+                }
+                fetch(`/api/effect?strip=${strip.id}&name=${effect}`)
                     .then(res => res.json())
-                    .then(data => {
-                        status.textContent = data.message;
-                    });
+                    .then(data => updateStatusMessage(data.message));
             });
+        });
+
+        stripSelect.addEventListener('change', () => {
+            const selectedId = parseInt(stripSelect.value, 10);
+            setSelectedStrip(selectedId);
         });
 
         async function refreshStatus() {
             const response = await fetch('/api/status');
             const data = await response.json();
-            status.textContent = data.connected ? 'Conectado al controlador BLE' : 'Sin conexión BLE';
+            status.textContent = data.connected ? 'Wi-Fi y BLE OK' : 'Verifica conexión Wi-Fi/BLE';
         }
 
-        setInterval(refreshStatus, 5000);
+        fetchStrips();
         refreshStatus();
+        setInterval(refreshStatus, 5000);
+        setInterval(fetchStrips, 10000);
     </script>
 </body>
 </html>
@@ -300,12 +390,21 @@ static String buildStripListJson() {
 
 static String buildStripListApiJson() {
     String json = "[";
-    for (size_t i = 0; i < stripDefinitions.size(); ++i) {
+    for (size_t i = 0; i < strips.size(); ++i) {
         if (i > 0) {
             json += ",";
         }
-        const StripDefinition& strip = stripDefinitions[i];
-        json += "{\"id\":" + String(i) + ",\"name\":\"" + escapeForJson(strip.name) + "\",\"mac\":\"" + escapeForJson(strip.mac) + "\"}";
+        const StripInstance* strip = strips[i].get();
+        json += "{\"id\":" + String(strip->index) +
+                ",\"name\":\"" + escapeForJson(strip->definition.name) +
+                "\",\"mac\":\"" + escapeForJson(strip->definition.mac) +
+                "\",\"connected\":" + (strip->bleConnected ? "true" : "false") +
+                ",\"power\":" + (strip->power ? "true" : "false") +
+                ",\"red\":" + String(strip->lastState.red) +
+                ",\"green\":" + String(strip->lastState.green) +
+                ",\"blue\":" + String(strip->lastState.blue) +
+                ",\"brightness\":" + String(strip->lastState.brightness) +
+                "}";
     }
     json += "]";
     return json;
