@@ -1017,6 +1017,14 @@ void setup() {
         restartAt = millis() + 1000;
     });
 
+    setupServer.on("/api/ble-discovery", []() {
+        if (bleScanResults.empty() || (millis() - lastBleScanAt) >= BLE_SCAN_TTL_MS) {
+            performBleScan();
+        }
+        String body = String("{\"status\":\"ready\",\"timestamp\":") + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
+        setupServer.send(200, "application/json", body);
+    });
+
     appServer.on("/", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         request->send_P(200, "text/html", index_html);
     });
