@@ -570,6 +570,7 @@ static void scheduleBleScan(bool force = false) {
     if (!force && !wifiSetupMode && !wifiConnected) {
         return;
     }
+    Serial.printf("Programando BLE scan (force=%d, wifiReady=%d, setup=%d)\n", force, wifiConnected, wifiSetupMode);
     bleScanInProgress = true;
     xTaskCreatePinnedToCore(bleScanTask, "BleScan", 4096, nullptr, 1, &bleScanTaskHandle, 1);
 }
@@ -822,6 +823,7 @@ static bool startStationFromSavedCredentials() {
         }
         Serial.print("WiFi conectado. IP: ");
         Serial.println(WiFi.localIP());
+        Serial.printf("WiFi -> %s/%s\n", WiFi.localIP().toString().c_str(), WiFi.macAddress().c_str());
         scheduleBleScan();
         return true;
     }

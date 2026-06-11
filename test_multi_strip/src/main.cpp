@@ -72,11 +72,23 @@ static String buildSuccess(bool ok) {
 
 void setup() {
   Serial.begin(115200);
+  Serial.print("Test multi-strip: conectando a WiFi ");
+  Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(200);
+  unsigned long startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 20000) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi conectado en prueba. IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi test fallo");
   }
   server.on("/", HTTP_GET, []() {
+    Serial.println("Sirviendo dashboard de prueba");
     server.send(200, "text/html", TEST_PAGE);
   });
   server.on("/api/color", HTTP_GET, []() {
@@ -93,6 +105,7 @@ void setup() {
     blue = constrain(blue, 0, 255);
     stripControl[strip].begin();
     stripControl[strip].configure(stripMacs[strip], BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
+    Serial.printf("Enviando color a tira %d -> %d,%d,%d\n", strip, red, green, blue);
     const bool ok = stripControl[strip].sendColor(red, green, blue, 0xFF);
     server.send(200, "application/json", buildSuccess(ok));
   });
@@ -100,4 +113,5 @@ void setup() {
 }
 
 void loop() {
+  server.handleClient();
 }
