@@ -91,6 +91,8 @@ static std::vector<std::unique_ptr<StripInstance>> strips;
 static std::map<unsigned char, StripInstance*> alexaDeviceMap;
 static std::vector<BleScanEntry> bleScanResults;
 static unsigned long lastBleScanAt = 0;
+static bool bleScanInProgress = false;
+static TaskHandle_t bleScanTaskHandle = nullptr;
 
 static unsigned long lastStatusLog = 0;
 static unsigned long indicatorStart = 0;
@@ -512,6 +514,7 @@ static void performBleScan() {
     BLEScan* scanner = BLEDevice::getScan();
     if (!scanner) {
         bleScanResults.clear();
+        lastBleScanAt = millis();
         return;
     }
     scanner->setActiveScan(true);
@@ -539,6 +542,21 @@ static void performBleScan() {
         bleScanResults.push_back({ name.length() ? name : String("Desconocido"), mac, device.getRSSI() });
     }
     lastBleScanAt = millis();
+}
+
+static void bleScanTask(void* params) {
+    performBleScan();
+    bleScanInProgress = false;
+    bleScanTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void scheduleBleScan() {
+    if (bleScanInProgress) {
+        return;
+    }
+    bleScanInProgress = true;
+    xTaskCreatePinnedToCore(bleScanTask, "BleScan", 4096, nullptr, 1, &bleScanTaskHandle, 1);
 }
 
 static String buildBleScanJson() {
@@ -671,6 +689,7 @@ static String setupPage() {
       const bleResults = document.getElementById('ble-results');
       const bleScanStatus = document.getElementById('ble-scan-status');
       const bleScanButton = document.getElementById('ble-scan');
+      let bleRefreshTimer = null;
 
       const createBleRow = (device) => {
         const wrapper = document.createElement('div');
@@ -697,17 +716,31 @@ static String setupPage() {
         devices.forEach(device => bleResults.appendChild(createBleRow(device)));
       };
 
+      const scheduleBleRefresh = (delay, refresh) => {
+        if (bleRefreshTimer) {
+          clearTimeout(bleRefreshTimer);
+        }
+        bleRefreshTimer = setTimeout(() => fetchBleDevices(refresh), delay);
+      };
+
       const fetchBleDevices = async (refresh = false) => {
         try {
-          bleScanStatus.textContent = refresh ? 'Escaneando... espera unos segundos' : 'Cargando resultados recientes...';
+          bleScanStatus.textContent = refresh ? 'Escaneando... espera unos segundos' : 'Actualizando lista...';
           const url = `/api/ble-discovery${refresh ? '?refresh=1' : ''}`;
           const response = await fetch(url);
           const payload = await response.json();
           renderBleDevices(payload.results || []);
-          bleScanStatus.textContent = payload.status === 'scanning' ? 'Escaneando...' : `Último escaneo: ${new Date(payload.timestamp).toLocaleTimeString()}`;
+          if (payload.status === 'scanning') {
+            bleScanStatus.textContent = 'Escaneando (20s)...';
+            scheduleBleRefresh(3000, false);
+          } else {
+            bleScanStatus.textContent = `Último escaneo: ${payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : 'justo ahora'}`;
+            scheduleBleRefresh(15000, false);
+          }
         } catch (error) {
           bleResults.innerHTML = '<p class="small">No se pudo consultar los dispositivos BLE.</p>';
           bleScanStatus.textContent = 'Error al escanear. Reintenta.';
+          scheduleBleRefresh(5000, false);
         }
       };
 
@@ -742,6 +775,7 @@ static void startApSetup() {
     Serial.println(WiFi.softAPIP());
     Serial.print("Clientes AP: ");
     Serial.println(WiFi.softAPgetStationNum());
+    scheduleBleScan();
 }
 
 static bool startStationFromSavedCredentials() {
@@ -978,6 +1012,7 @@ void setup() {
     loadStripDefinitions();
     rebuildStripInstances();
     BLEDevice::init("ESP32-LED-Bridge");
+    scheduleBleScan();
 
     setupServer.on("/", []() {
         setupServer.send(200, "text/html", setupPage());
@@ -1018,10 +1053,9 @@ void setup() {
     });
 
     setupServer.on("/api/ble-discovery", []() {
-        if (bleScanResults.empty() || (millis() - lastBleScanAt) >= BLE_SCAN_TTL_MS) {
-            performBleScan();
-        }
-        String body = String("{\"status\":\"ready\",\"timestamp\":") + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
+        scheduleBleScan();
+        String status = bleScanInProgress ? String("scanning") : String("ready");
+        String body = String("{\"status\":\"") + status + "\",\"timestamp\":" + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
         setupServer.send(200, "application/json", body);
     });
 
@@ -1055,10 +1089,14 @@ void setup() {
 
     appServer.on("/api/ble-discovery", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
         const bool refresh = request->hasParam("refresh") && request->getParam("refresh")->value() == "1";
-        if (refresh || bleScanResults.empty() || (millis() - lastBleScanAt) >= BLE_SCAN_TTL_MS) {
-            performBleScan();
+        if (refresh) {
+            scheduleBleScan();
         }
-        String body = String("{\"status\":\"ready\",\"timestamp\":") + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
+        if (bleScanResults.empty() && !bleScanInProgress) {
+            scheduleBleScan();
+        }
+        String status = bleScanInProgress ? String("scanning") : String("ready");
+        String body = String("{\"status\":\"") + status + "\",\"timestamp\":" + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
         request->send(200, "application/json", body);
     });
 
