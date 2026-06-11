@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
@@ -34,10 +35,18 @@ static constexpr unsigned long INDICATOR_DURATION = 10000;
 static constexpr char STRIP_CONFIG_NS[] = "stripcfg";
 static constexpr char STRIP_STATE_NS[] = "stripstate";
 static constexpr uint8_t MAX_STRIP_ENTRIES = 8;
+static constexpr int BLE_SCAN_SECONDS = 4;
+static constexpr unsigned long BLE_SCAN_TTL_MS = 120000;
 
 struct StripDefinition {
     String name;
     String mac;
+};
+
+struct BleScanEntry {
+    String name;
+    String mac;
+    int rssi;
 };
 
 struct LedState {
@@ -80,6 +89,8 @@ struct StripInstance {
 
 static std::vector<std::unique_ptr<StripInstance>> strips;
 static std::map<unsigned char, StripInstance*> alexaDeviceMap;
+static std::vector<BleScanEntry> bleScanResults;
+static unsigned long lastBleScanAt = 0;
 
 static unsigned long lastStatusLog = 0;
 static unsigned long indicatorStart = 0;
@@ -497,6 +508,52 @@ static void rebuildStripInstances() {
     }
 }
 
+static void performBleScan() {
+    BLEScan* scanner = BLEDevice::getScan();
+    if (!scanner) {
+        bleScanResults.clear();
+        return;
+    }
+    scanner->setActiveScan(true);
+    scanner->setInterval(100);
+    scanner->setWindow(99);
+    BLEScanResults results = scanner->start(BLE_SCAN_SECONDS, false);
+    bleScanResults.clear();
+    for (int i = 0; i < results.getCount(); ++i) {
+        BLEAdvertisedDevice device = results.getDevice(i);
+        String mac = device.getAddress().toString().c_str();
+        String name = device.getName().c_str();
+        if (mac.length() == 0) {
+            continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing : bleScanResults) {
+            if (existing.mac == mac) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        bleScanResults.push_back({ name.length() ? name : String("Desconocido"), mac, device.getRSSI() });
+    }
+    lastBleScanAt = millis();
+}
+
+static String buildBleScanJson() {
+    String json = "[";
+    for (size_t i = 0; i < bleScanResults.size(); ++i) {
+        if (i > 0) {
+            json += ",";
+        }
+        const BleScanEntry& entry = bleScanResults[i];
+        json += "{\"name\":\"" + escapeForJson(entry.name) + "\",\"mac\":\"" + escapeForJson(entry.mac) + "\",\"rssi\":" + String(entry.rssi) + "}";
+    }
+    json += "]";
+    return json;
+}
+
 static String setupPage() {
     String page = R"rawliteral(
 <!DOCTYPE html>
@@ -513,13 +570,20 @@ static String setupPage() {
     input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#0a0f1f;color:#fff;margin-top:8px}
     button,a{display:inline-block;width:100%;margin-top:16px;padding:12px 14px;border:0;border-radius:999px;background:#4b7bff;color:#fff;text-align:center;text-decoration:none;font-weight:700}
     .small{font-size:13px;color:#9aa8d5;line-height:1.5}
-    .strip-section{margin-top:24px}
-    .strip-section h2{margin:0;font-size:1rem;letter-spacing:.1em;text-transform:uppercase;color:#9aa8d5}
-    .strip-entry{border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin-top:14px;background:rgba(255,255,255,.02)}
-    .strip-entry label{font-size:10px;text-transform:uppercase;color:#7f8cb3;margin-top:10px}
-    .strip-entry input{margin-top:4px}
-    .strip-entry .remove-strip{background:#ff5f5f;}
-    .strip-section button#add-strip{background:#0da0ff;}
+        .strip-section{margin-top:24px}
+        .strip-section h2{margin:0;font-size:1rem;letter-spacing:.1em;text-transform:uppercase;color:#9aa8d5}
+        .strip-entry{border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin-top:14px;background:rgba(255,255,255,.02)}
+        .strip-entry label{font-size:10px;text-transform:uppercase;color:#7f8cb3;margin-top:10px}
+        .strip-entry input{margin-top:4px}
+        .strip-entry .remove-strip{background:#ff5f5f;}
+        .strip-section button#add-strip{background:#0da0ff;}
+        .ble-scan-section{margin-top:24px;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;background:rgba(255,255,255,.02)}
+        .ble-scan-header{display:flex;justify-content:space-between;align-items:center;gap:.5rem;}
+        .ble-scan-header h2{margin:0;font-size:.9rem;letter-spacing:.1em;text-transform:uppercase;color:#9aa8d5}
+        #ble-results{margin-top:12px;display:flex;flex-direction:column;gap:.75rem;}
+        .ble-device{padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;align-items:center;gap:1rem;background:rgba(255,255,255,.02);}
+        .ble-device span{font-size:.85rem;}
+        .ble-device button{border:none;border-radius:12px;padding:.45rem .9rem;background:#0da0ff;color:#fff;font-size:.8rem;cursor:pointer;}
   </style>
 </head>
 <body>
@@ -535,6 +599,14 @@ static String setupPage() {
       <div id="strip-list"></div>
       <button type="button" id="add-strip">Agregar otra tira</button>
       <input type="hidden" name="strip_count" id="strip-count" value="0" />
+    </div>
+    <div class="ble-scan-section">
+      <div class="ble-scan-header">
+        <h2>Detectar tiras cercanas</h2>
+        <button type="button" id="ble-scan">Buscar ahora</button>
+      </div>
+      <p class="small" id="ble-scan-status">Presiona buscar para descubrir qué tiras están cerca.</p>
+      <div id="ble-results"></div>
     </div>
     <button type="submit">Guardar y conectar</button>
   </form>
@@ -595,6 +667,52 @@ static String setupPage() {
       } else {
         addStripEntry('Tira LED', '');
       }
+
+      const bleResults = document.getElementById('ble-results');
+      const bleScanStatus = document.getElementById('ble-scan-status');
+      const bleScanButton = document.getElementById('ble-scan');
+
+      const createBleRow = (device) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'ble-device';
+        const info = document.createElement('span');
+        info.textContent = `${device.name} • ${device.mac} • RSSI ${device.rssi}`;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Agregar';
+        btn.addEventListener('click', () => {
+          addStripEntry(device.name, device.mac);
+        });
+        wrapper.appendChild(info);
+        wrapper.appendChild(btn);
+        return wrapper;
+      };
+
+      const renderBleDevices = (devices) => {
+        bleResults.innerHTML = '';
+        if (!devices.length) {
+          bleResults.innerHTML = '<p class="small">No se detectaron tiras BLE aún. Intenta volver a escanear.</p>';
+          return;
+        }
+        devices.forEach(device => bleResults.appendChild(createBleRow(device)));
+      };
+
+      const fetchBleDevices = async (refresh = false) => {
+        try {
+          bleScanStatus.textContent = refresh ? 'Escaneando... espera unos segundos' : 'Cargando resultados recientes...';
+          const url = `/api/ble-discovery${refresh ? '?refresh=1' : ''}`;
+          const response = await fetch(url);
+          const payload = await response.json();
+          renderBleDevices(payload.results || []);
+          bleScanStatus.textContent = payload.status === 'scanning' ? 'Escaneando...' : `Último escaneo: ${new Date(payload.timestamp).toLocaleTimeString()}`;
+        } catch (error) {
+          bleResults.innerHTML = '<p class="small">No se pudo consultar los dispositivos BLE.</p>';
+          bleScanStatus.textContent = 'Error al escanear. Reintenta.';
+        }
+      };
+
+      bleScanButton.addEventListener('click', () => fetchBleDevices(true));
+      fetchBleDevices(true);
     })();
   </script>
 </body>
@@ -924,6 +1042,15 @@ void setup() {
         const bool wifiReady = (WiFi.status() == WL_CONNECTED);
         const bool bleReady = anyStripConnected();
         const String body = buildJsonStatus(bleReady && wifiReady, wifiSetupMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString(), wifiSetupMode ? "setup" : (wifiConnected ? "station" : "reconnecting"));
+        request->send(200, "application/json", body);
+    });
+
+    appServer.on("/api/ble-discovery", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
+        const bool refresh = request->hasParam("refresh") && request->getParam("refresh")->value() == "1";
+        if (refresh || bleScanResults.empty() || (millis() - lastBleScanAt) >= BLE_SCAN_TTL_MS) {
+            performBleScan();
+        }
+        String body = String("{\"status\":\"ready\",\"timestamp\":") + String(lastBleScanAt) + ",\"results\":" + buildBleScanJson() + "}";
         request->send(200, "application/json", body);
     });
 
