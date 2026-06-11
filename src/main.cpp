@@ -10,18 +10,19 @@
 #include <cmath>
 #include <string>
 #include <cctype>
+#include <vector>
+#include <map>
+#include <memory>
 
 #include "controller_settings.h"
 #include "ble_control.h"
 
-BLEControl ledController;
 AsyncWebServer appServer(81);
 WebServer setupServer(80);
 fauxmoESP fauxmo;
 Preferences prefs;
 
 static constexpr char WIFI_PREF_NS[] = "wifi";
-static constexpr char STATE_PREF_NS[] = "led";
 static constexpr char HOSTNAME[] = "led-bridge";
 static constexpr char AP_SSID[] = "LED-Bridge-Setup";
 static constexpr int STATUS_LED_PIN = 2;
@@ -30,30 +31,20 @@ static constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 static constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 static constexpr unsigned long STATUS_INTERVAL_MS = 5000;
 static constexpr unsigned long INDICATOR_DURATION = 10000;
+static constexpr char STRIP_CONFIG_NS[] = "stripcfg";
+static constexpr char STRIP_STATE_NS[] = "stripstate";
+static constexpr uint8_t MAX_STRIP_ENTRIES = 8;
+
+struct StripDefinition {
+    String name;
+    String mac;
+};
 
 struct LedState {
     uint8_t red;
     uint8_t green;
     uint8_t blue;
     uint8_t brightness;
-};
-LedState lastState{255, 0, 0, 0xFF};
-bool alexaPower = true;
-static unsigned long lastStatusLog = 0;
-static unsigned long indicatorStart = 0;
-static bool indicatorActive = false;
-static bool indicatorShown = false;
-static bool indicatorDone = false;
-static bool wifiSetupMode = false;
-static bool wifiConnected = false;
-static unsigned long wifiRetryAt = 0;
-static bool restartPending = false;
-static unsigned long restartAt = 0;
-
-struct WifiCredentials {
-    String ssid;
-    String password;
-    bool valid() const { return ssid.length() > 0; }
 };
 
 enum class EffectType { NONE, MUSIC, POLICE, STROBE };
@@ -66,7 +57,47 @@ struct EffectState {
     int step = 0;
     bool toggle = false;
 };
-EffectState effect;
+
+struct AlexaCommand {
+    bool pending = false;
+    bool state = true;
+    unsigned char brightness = 0xFF;
+    bool hasRgb = false;
+    byte rgb[3] = {0, 0, 0};
+};
+
+struct StripInstance {
+    StripDefinition definition;
+    LedState lastState{255, 0, 0, 0xFF};
+    bool power = true;
+    bool bleConnected = false;
+    EffectState effect;
+    AlexaCommand alexaAction;
+    unsigned char fauxmoDeviceId = 0;
+    uint8_t index = 0;
+    BLEControl control;
+};
+
+static std::vector<std::unique_ptr<StripInstance>> strips;
+static std::map<unsigned char, StripInstance*> alexaDeviceMap;
+
+static unsigned long lastStatusLog = 0;
+static unsigned long indicatorStart = 0;
+static bool indicatorActive = false;
+static bool indicatorShown = false;
+static bool indicatorDone = false;
+static bool wifiSetupMode = false;
+static bool wifiConnected = false;
+static unsigned long wifiRetryAt = 0;
+static bool restartPending = false;
+static unsigned long restartAt = 0;
+static std::vector<StripDefinition> stripDefinitions;
+
+struct WifiCredentials {
+    String ssid;
+    String password;
+    bool valid() const { return ssid.length() > 0; }
+};
 
 static const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -223,8 +254,151 @@ static void clearWifiCredentials() {
     prefs.end();
 }
 
+static String escapeForJson(const String& value) {
+    String escaped;
+    for (size_t i = 0; i < value.length(); ++i) {
+        char c = value[i];
+        if (c == '\\' || c == '"') {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    return escaped;
+}
+
+static String escapeForSingleQuotedJS(const String& value) {
+    String escaped;
+    for (size_t i = 0; i < value.length(); ++i) {
+        char c = value[i];
+        if (c == '\\') {
+            escaped += "\\\\";
+        } else if (c == '\'') {
+            escaped += "\\'";
+        } else if (c == '\n') {
+            escaped += "\\n";
+        } else if (c == '\r') {
+            escaped += "\\r";
+        } else {
+            escaped += c;
+        }
+    }
+    return escaped;
+}
+
+static String buildStripListJson() {
+    String json = "[";
+    for (size_t i = 0; i < stripDefinitions.size(); ++i) {
+        if (i > 0) {
+            json += ",";
+        }
+        const StripDefinition& strip = stripDefinitions[i];
+        json += "{\"name\":\"" + escapeForJson(strip.name) + "\",\"mac\":\"" + escapeForJson(strip.mac) + "\"}";
+    }
+    json += "]";
+    return escapeForSingleQuotedJS(json);
+}
+
+static String buildStripListApiJson() {
+    String json = "[";
+    for (size_t i = 0; i < stripDefinitions.size(); ++i) {
+        if (i > 0) {
+            json += ",";
+        }
+        const StripDefinition& strip = stripDefinitions[i];
+        json += "{\"id\":" + String(i) + ",\"name\":\"" + escapeForJson(strip.name) + "\",\"mac\":\"" + escapeForJson(strip.mac) + "\"}";
+    }
+    json += "]";
+    return json;
+}
+
+static void loadStripDefinitions() {
+    stripDefinitions.clear();
+    prefs.begin(STRIP_CONFIG_NS, false);
+    uint8_t count = prefs.getUChar("count", 0);
+    for (uint8_t i = 0; i < count; ++i) {
+        String prefix = "strip_" + String(i) + "_";
+        String name = prefs.getString((prefix + "name").c_str(), "");
+        String mac = prefs.getString((prefix + "mac").c_str(), "");
+        name.trim();
+        mac.trim();
+        if (mac.length() == 0) {
+            continue;
+        }
+        stripDefinitions.push_back({ name.length() ? name : String("Tira LED"), mac });
+    }
+    prefs.end();
+    if (stripDefinitions.empty()) {
+        stripDefinitions.push_back({ String("Tira LED"), String(BLE_CONTROLLER_ADDRESS) });
+    }
+}
+
+static void saveStripDefinitions() {
+    prefs.begin(STRIP_CONFIG_NS, false);
+    prefs.clear();
+    const uint8_t count = stripDefinitions.size();
+    prefs.putUChar("count", count);
+    for (uint8_t i = 0; i < count; ++i) {
+        const StripDefinition& strip = stripDefinitions[i];
+        String prefix = "strip_" + String(i) + "_";
+        prefs.putString((prefix + "name").c_str(), strip.name);
+        prefs.putString((prefix + "mac").c_str(), strip.mac);
+    }
+    prefs.end();
+}
+
+static StripInstance* getStripByIndex(int index) {
+    if (index < 0 || index >= static_cast<int>(strips.size())) {
+        return nullptr;
+    }
+    return strips[index].get();
+}
+
+static void loadStripState(uint8_t index, StripInstance& strip) {
+    prefs.begin(STRIP_STATE_NS, false);
+    String prefix = "strip_" + String(index) + "_";
+    strip.lastState.red = prefs.getUChar((prefix + "red").c_str(), strip.lastState.red);
+    strip.lastState.green = prefs.getUChar((prefix + "green").c_str(), strip.lastState.green);
+    strip.lastState.blue = prefs.getUChar((prefix + "blue").c_str(), strip.lastState.blue);
+    strip.lastState.brightness = prefs.getUChar((prefix + "brightness").c_str(), strip.lastState.brightness);
+    strip.power = prefs.getBool((prefix + "power").c_str(), strip.power);
+    prefs.end();
+    strip.index = index;
+}
+
+static void saveStripState(uint8_t index, const StripInstance& strip) {
+    prefs.begin(STRIP_STATE_NS, false);
+    String prefix = "strip_" + String(index) + "_";
+    prefs.putUChar((prefix + "red").c_str(), strip.lastState.red);
+    prefs.putUChar((prefix + "green").c_str(), strip.lastState.green);
+    prefs.putUChar((prefix + "blue").c_str(), strip.lastState.blue);
+    prefs.putUChar((prefix + "brightness").c_str(), strip.lastState.brightness);
+    prefs.putBool((prefix + "power").c_str(), strip.power);
+    prefs.end();
+}
+
+static void rebuildStripInstances() {
+    strips.clear();
+    alexaDeviceMap.clear();
+    for (uint8_t i = 0; i < stripDefinitions.size(); ++i) {
+        auto instance = std::unique_ptr<StripInstance>(new StripInstance());
+        instance->definition = stripDefinitions[i];
+        loadStripState(i, *instance);
+        instance->control.configure(stripDefinitions[i].mac.c_str(), BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
+        instance->index = i;
+        strips.push_back(std::move(instance));
+    }
+    if (strips.empty()) {
+        auto fallback = std::unique_ptr<StripInstance>(new StripInstance());
+        fallback->definition = { String("Tira LED"), String(BLE_CONTROLLER_ADDRESS) };
+        loadStripState(0, *fallback);
+        fallback->control.configure(BLE_CONTROLLER_ADDRESS, BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
+        fallback->index = 0;
+        strips.push_back(std::move(fallback));
+    }
+}
+
 static String setupPage() {
-    return R"rawliteral(
+    String page = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -233,27 +407,101 @@ static String setupPage() {
   <title>LED Bridge Setup</title>
   <style>
     body{font-family:system-ui,-apple-system,sans-serif;background:#0c1020;color:#f5f7ff;margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}
-    .card{width:100%;max-width:420px;background:#121831;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:24px}
+    .card{width:100%;max-width:480px;background:#121831;border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:24px}
     h1{margin:0 0 8px}
     label{display:block;margin-top:14px;font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:#93a4d9}
     input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#0a0f1f;color:#fff;margin-top:8px}
     button,a{display:inline-block;width:100%;margin-top:16px;padding:12px 14px;border:0;border-radius:999px;background:#4b7bff;color:#fff;text-align:center;text-decoration:none;font-weight:700}
     .small{font-size:13px;color:#9aa8d5;line-height:1.5}
+    .strip-section{margin-top:24px}
+    .strip-section h2{margin:0;font-size:1rem;letter-spacing:.1em;text-transform:uppercase;color:#9aa8d5}
+    .strip-entry{border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;margin-top:14px;background:rgba(255,255,255,.02)}
+    .strip-entry label{font-size:10px;text-transform:uppercase;color:#7f8cb3;margin-top:10px}
+    .strip-entry input{margin-top:4px}
+    .strip-entry .remove-strip{background:#ff5f5f;}
+    .strip-section button#add-strip{background:#0da0ff;}
   </style>
 </head>
 <body>
   <form class="card" method="POST" action="/setup/save">
     <h1>LED Bridge</h1>
-    <p class="small">Conecta el dispositivo a tu Wi-Fi. Si ya cambiaste de red, borra credenciales con el boton fisico y vuelve a configurar.</p>
+    <p class="small">Conecta el dispositivo a tu Wi-Fi y registra cada tira BLE para que Alexa las descubra fácilmente.</p>
     <label for="ssid">SSID</label>
     <input id="ssid" name="ssid" autocomplete="off" required />
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="off" />
+    <div class="strip-section">
+      <h2>Tiras conectadas</h2>
+      <div id="strip-list"></div>
+      <button type="button" id="add-strip">Agregar otra tira</button>
+      <input type="hidden" name="strip_count" id="strip-count" value="0" />
+    </div>
     <button type="submit">Guardar y conectar</button>
   </form>
+  <script>
+    (function() {
+      const stripList = document.getElementById('strip-list');
+      const stripCount = document.getElementById('strip-count');
+      const addButton = document.getElementById('add-strip');
+      const existingStrips = JSON.parse('{stripData}');
+
+      function refreshStripIndices() {
+        const entries = stripList.querySelectorAll('.strip-entry');
+        entries.forEach((entry, index) => {
+          entry.dataset.index = index;
+          entry.querySelector('[data-name-field]').name = `strip_name_${index}`;
+          entry.querySelector('[data-mac-field]').name = `strip_mac_${index}`;
+        });
+        stripCount.value = entries.length;
+      }
+
+      function addStripEntry(name = '', mac = '') {
+        const entry = document.createElement('div');
+        entry.className = 'strip-entry';
+        const nameLabel = document.createElement('label');
+        nameLabel.textContent = 'Nombre (alias Alexa)';
+        entry.appendChild(nameLabel);
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.dataset.nameField = 'true';
+        nameInput.placeholder = 'Sala, Cocina...';
+        nameInput.value = name;
+        entry.appendChild(nameInput);
+        const macLabel = document.createElement('label');
+        macLabel.textContent = 'Dirección MAC BLE';
+        entry.appendChild(macLabel);
+        const macInput = document.createElement('input');
+        macInput.type = 'text';
+        macInput.dataset.macField = 'true';
+        macInput.placeholder = 'AA:BB:CC:DD:EE:FF';
+        macInput.value = mac;
+        entry.appendChild(macInput);
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'remove-strip';
+        removeBtn.textContent = 'Eliminar';
+        removeBtn.addEventListener('click', () => {
+          entry.remove();
+          refreshStripIndices();
+        });
+        entry.appendChild(removeBtn);
+        stripList.appendChild(entry);
+        refreshStripIndices();
+      }
+
+      addButton.addEventListener('click', () => addStripEntry());
+      if (existingStrips.length) {
+        existingStrips.forEach(strip => addStripEntry(strip.name, strip.mac));
+      } else {
+        addStripEntry('Tira LED', '');
+      }
+    })();
+  </script>
 </body>
 </html>
 )rawliteral";
+    page.replace("{stripData}", buildStripListJson());
+    return page;
 }
 
 static void updateIndicatorsForWifi(bool connected) {
@@ -349,31 +597,25 @@ static void handleWifiReconnect() {
     WiFi.begin(creds.ssid.c_str(), creds.password.c_str());
 }
 
-void saveState() {
-    prefs.begin(STATE_PREF_NS, false);
-    prefs.putUChar("red", lastState.red);
-    prefs.putUChar("green", lastState.green);
-    prefs.putUChar("blue", lastState.blue);
-    prefs.putUChar("brightness", lastState.brightness);
-    prefs.putBool("power", alexaPower);
-    prefs.end();
+static StripInstance* resolveStripFromRequest(AsyncWebServerRequest* request) {
+    int stripId = request->hasParam("strip") ? request->getParam("strip")->value().toInt() : 0;
+    return getStripByIndex(stripId);
 }
 
-void loadState() {
-    prefs.begin(STATE_PREF_NS, false);
-    lastState.red = prefs.getUChar("red", 255);
-    lastState.green = prefs.getUChar("green", 0);
-    lastState.blue = prefs.getUChar("blue", 0);
-    lastState.brightness = prefs.getUChar("brightness", 0xFF);
-    alexaPower = prefs.getBool("power", true);
-    prefs.end();
+static bool anyStripConnected() {
+    for (const auto& instance : strips) {
+        if (instance->control.isConnected()) {
+            return true;
+        }
+    }
+    return false;
 }
 
-void stopEffect() {
-    effect.type = EffectType::NONE;
+static void stopEffect(StripInstance& strip) {
+    strip.effect.type = EffectType::NONE;
 }
 
-void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
+static void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
     float hh = h / 60.0f;
     int i = floor(hh);
     float f = hh - i;
@@ -381,8 +623,8 @@ void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& out_r, uint8_t& out_g, 
     float q = v * (1 - f * s / 255.0f);
     float t = v * (1 - (1 - f) * s / 255.0f);
     float r, g, b;
-    auto clampVal = [](float v) -> uint8_t {
-        return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, v)));
+    auto clampVal = [](float value) -> uint8_t {
+        return static_cast<uint8_t>(std::max(0.0f, std::min(255.0f, value)));
     };
     switch (i % 6) {
         case 0: r = v; g = t; b = p; break;
@@ -397,63 +639,67 @@ void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& out_r, uint8_t& out_g, 
     out_b = clampVal(b);
 }
 
-void startEffect(EffectType type, unsigned long duration, unsigned long interval) {
-    effect.type = type;
-    effect.interval = interval ? interval : 200;
-    effect.nextChange = millis();
-    effect.endTime = duration ? millis() + duration : 0;
-    effect.step = 0;
-    effect.toggle = false;
+static void startEffect(StripInstance& strip, EffectType type, unsigned long duration, unsigned long interval) {
+    strip.effect.type = type;
+    strip.effect.interval = interval ? interval : 200;
+    strip.effect.nextChange = millis();
+    strip.effect.endTime = duration ? millis() + duration : 0;
+    strip.effect.step = 0;
+    strip.effect.toggle = false;
 }
 
-bool applyColor(uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bool updateState = true) {
-    const bool success = ledController.sendColor(red, green, blue, brightness);
+static bool applyColor(StripInstance& strip, uint8_t red, uint8_t green, uint8_t blue, uint8_t brightness, bool updateState = true) {
+    const bool success = strip.control.sendColor(red, green, blue, brightness);
+    strip.bleConnected = success && strip.control.isConnected();
     if (success && updateState) {
-        stopEffect();
-        lastState.red = red;
-        lastState.green = green;
-        lastState.blue = blue;
-        lastState.brightness = brightness;
-        alexaPower = true;
-        saveState();
+        stopEffect(strip);
+        strip.lastState.red = red;
+        strip.lastState.green = green;
+        strip.lastState.blue = blue;
+        strip.lastState.brightness = brightness;
+        strip.power = true;
+        saveStripState(strip.index, strip);
+    }
+    if (!success) {
+        strip.bleConnected = false;
     }
     return success;
 }
 
-void updateEffect() {
-    if (effect.type == EffectType::NONE) {
+static void updateEffect(StripInstance& strip) {
+    if (strip.effect.type == EffectType::NONE) {
         return;
     }
     const unsigned long now = millis();
-    if (effect.endTime && now >= effect.endTime) {
-        stopEffect();
+    if (strip.effect.endTime && now >= strip.effect.endTime) {
+        stopEffect(strip);
         return;
     }
-    if (now < effect.nextChange) {
+    if (now < strip.effect.nextChange) {
         return;
     }
-    effect.nextChange = now + effect.interval;
+    strip.effect.nextChange = now + strip.effect.interval;
     uint8_t r = 0, g = 0, b = 0;
-    switch (effect.type) {
+    switch (strip.effect.type) {
         case EffectType::MUSIC:
-            effect.step = (effect.step + 15) % 360;
-            hsvToRgb(effect.step, 255, 255, r, g, b);
-            applyColor(r, g, b, 0xFF, false);
+            strip.effect.step = (strip.effect.step + 15) % 360;
+            hsvToRgb(strip.effect.step, 255, 255, r, g, b);
+            applyColor(strip, r, g, b, 0xFF, false);
             break;
         case EffectType::POLICE:
-            effect.toggle = !effect.toggle;
-            if (effect.toggle) {
-                applyColor(255, 0, 0, 0xFF, false);
+            strip.effect.toggle = !strip.effect.toggle;
+            if (strip.effect.toggle) {
+                applyColor(strip, 255, 0, 0, 0xFF, false);
             } else {
-                applyColor(0, 0, 255, 0xFF, false);
+                applyColor(strip, 0, 0, 255, 0xFF, false);
             }
             break;
         case EffectType::STROBE:
-            effect.toggle = !effect.toggle;
-            if (effect.toggle) {
-                applyColor(255, 255, 255, 0xFF, false);
+            strip.effect.toggle = !strip.effect.toggle;
+            if (strip.effect.toggle) {
+                applyColor(strip, 255, 255, 255, 0xFF, false);
             } else {
-                applyColor(0, 0, 0, 0x00, false);
+                applyColor(strip, 0, 0, 0, 0x00, false);
             }
             break;
         default:
@@ -461,18 +707,43 @@ void updateEffect() {
     }
 }
 
-void handleAlexaCommand(bool state, unsigned char brightness, byte* rgb) {
-    alexaPower = state;
-    prefs.putBool("power", state);
-    if (!state) {
-        ledController.sendColor(0, 0, 0, 0x10);
-        return;
-    }
-    uint8_t effectiveBrightness = brightness ? brightness : lastState.brightness;
+static void handleAlexaCommand(StripInstance& strip, bool state, unsigned char brightness, byte* rgb) {
+    strip.alexaAction.pending = true;
+    strip.alexaAction.state = state;
+    strip.alexaAction.brightness = brightness;
+    strip.alexaAction.hasRgb = rgb != nullptr;
     if (rgb) {
-        applyColor(rgb[0], rgb[1], rgb[2], effectiveBrightness);
-    } else {
-        applyColor(lastState.red, lastState.green, lastState.blue, effectiveBrightness);
+        strip.alexaAction.rgb[0] = rgb[0];
+        strip.alexaAction.rgb[1] = rgb[1];
+        strip.alexaAction.rgb[2] = rgb[2];
+    }
+}
+
+static void processAlexaCommands() {
+    for (auto& instance : strips) {
+        StripInstance& strip = *instance;
+        if (!strip.alexaAction.pending) {
+            continue;
+        }
+        strip.alexaAction.pending = false;
+        strip.power = strip.alexaAction.state;
+        if (!strip.power) {
+            applyColor(strip, 0, 0, 0, 0x10, false);
+            saveStripState(strip.index, strip);
+            fauxmo.setState(strip.fauxmoDeviceId, false, 0);
+            continue;
+        }
+        uint8_t effectiveBrightness = strip.alexaAction.brightness ? constrain(strip.alexaAction.brightness, 1, 254) : strip.lastState.brightness;
+        if (strip.alexaAction.hasRgb) {
+            if (applyColor(strip, strip.alexaAction.rgb[0], strip.alexaAction.rgb[1], strip.alexaAction.rgb[2], effectiveBrightness)) {
+                fauxmo.setState(strip.fauxmoDeviceId, true, effectiveBrightness, strip.alexaAction.rgb);
+            }
+        } else {
+            byte rgb[3] = { strip.lastState.red, strip.lastState.green, strip.lastState.blue };
+            if (applyColor(strip, strip.lastState.red, strip.lastState.green, strip.lastState.blue, effectiveBrightness)) {
+                fauxmo.setState(strip.fauxmoDeviceId, true, effectiveBrightness, rgb);
+            }
+        }
     }
 }
 
@@ -485,10 +756,9 @@ void setup() {
     digitalWrite(STATUS_LED_PIN, LOW);
     digitalWrite(AUX_LED_PIN, LOW);
 
-    loadState();
-
-    ledController.begin();
-    ledController.configure(BLE_CONTROLLER_ADDRESS, BLE_SERVICE_UUID, BLE_CHARACTERISTIC_UUID);
+    loadStripDefinitions();
+    rebuildStripInstances();
+    BLEDevice::init("ESP32-LED-Bridge");
 
     setupServer.on("/", []() {
         setupServer.send(200, "text/html", setupPage());
@@ -505,6 +775,23 @@ void setup() {
             setupServer.send(400, "text/plain", "SSID requerido");
             return;
         }
+        int stripCount = setupServer.hasArg("strip_count") ? setupServer.arg("strip_count").toInt() : 0;
+        stripCount = constrain(stripCount, 0, MAX_STRIP_ENTRIES);
+        stripDefinitions.clear();
+        for (int i = 0; i < stripCount; ++i) {
+            String name = setupServer.arg("strip_name_" + String(i));
+            String mac = setupServer.arg("strip_mac_" + String(i));
+            name.trim();
+            mac.trim();
+            if (mac.length() == 0) {
+                continue;
+            }
+            stripDefinitions.push_back({ name.length() ? name : String("Tira LED"), mac });
+        }
+        if (stripDefinitions.empty()) {
+            stripDefinitions.push_back({ String("Tira LED"), String(BLE_CONTROLLER_ADDRESS) });
+        }
+        saveStripDefinitions();
         saveWifiCredentials(ssid, password);
         setupServer.send(200, "text/plain", "Guardado. Reiniciando...");
         restartPending = true;
@@ -516,6 +803,11 @@ void setup() {
     });
 
     appServer.on("/api/color", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
+        StripInstance* strip = resolveStripFromRequest(request);
+        if (!strip) {
+            request->send(400, "application/json", buildJson(false, "Strip inválida"));
+            return;
+        }
         const int red = clampColorParam(request, "red");
         const int green = clampColorParam(request, "green");
         const int blue = clampColorParam(request, "blue");
@@ -523,14 +815,19 @@ void setup() {
         if (request->hasParam("brightness")) {
             brightness = constrain(request->getParam("brightness")->value().toInt(), 0, 255);
         }
-        const bool success = applyColor(red, green, blue, brightness);
+        const bool success = applyColor(*strip, red, green, blue, brightness);
         request->send(200, "application/json", buildJson(success, success ? "Color enviado" : "Error BLE"));
     });
 
     appServer.on("/api/status", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
-        const bool connected = ledController.isConnected();
-        const String body = buildJsonStatus(connected, wifiSetupMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString(), wifiSetupMode ? "setup" : (wifiConnected ? "station" : "reconnecting"));
+        const bool wifiReady = (WiFi.status() == WL_CONNECTED);
+        const bool bleReady = anyStripConnected();
+        const String body = buildJsonStatus(bleReady && wifiReady, wifiSetupMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString(), wifiSetupMode ? "setup" : (wifiConnected ? "station" : "reconnecting"));
         request->send(200, "application/json", body);
+    });
+
+    appServer.on("/api/strips", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", buildStripListApiJson());
     });
 
     appServer.on("/api/wifi", AsyncWebRequestMethod::HTTP_POST, [](AsyncWebServerRequest* request) {
@@ -541,6 +838,11 @@ void setup() {
     });
 
     appServer.on("/api/effect", AsyncWebRequestMethod::HTTP_GET, [](AsyncWebServerRequest* request) {
+        StripInstance* strip = resolveStripFromRequest(request);
+        if (!strip) {
+            request->send(400, "application/json", buildJson(false, "Strip inválida"));
+            return;
+        }
         const char* nameParam = request->hasParam("name") ? request->getParam("name")->value().c_str() : "";
         const std::string name(nameParam);
         std::string lower = name;
@@ -549,7 +851,7 @@ void setup() {
         unsigned long speed = request->hasParam("speed") ? request->getParam("speed")->value().toInt() : 200;
         std::string message;
         if (lower == "stop" || lower.empty()) {
-            stopEffect();
+            stopEffect(*strip);
             message = "Efecto detenido";
         } else {
             EffectType type = EffectType::NONE;
@@ -559,7 +861,7 @@ void setup() {
             if (type == EffectType::NONE) {
                 message = "Efecto desconocido";
             } else {
-                startEffect(type, duration, speed);
+                startEffect(*strip, type, duration, speed);
                 message = "Efecto " + lower + " activado";
             }
         }
@@ -582,19 +884,35 @@ void setup() {
         fauxmo.createServer(true);
         fauxmo.setPort(80);
         fauxmo.enable(true);
-        fauxmo.addDevice("Tira LED");
+        for (auto& instance : strips) {
+            StripInstance& strip = *instance;
+            unsigned char deviceId = fauxmo.addDevice(strip.definition.name.c_str());
+            strip.fauxmoDeviceId = deviceId;
+            alexaDeviceMap[deviceId] = &strip;
+        }
         fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value) {
-            handleAlexaCommand(state, value, nullptr);
+            auto it = alexaDeviceMap.find(device_id);
+            if (it == alexaDeviceMap.end()) {
+                return;
+            }
+            handleAlexaCommand(*it->second, state, value, nullptr);
         });
         fauxmo.onSetState([](unsigned char device_id, const char* device_name, bool state, unsigned char value, byte* rgb) {
-            handleAlexaCommand(state, value, rgb);
+            auto it = alexaDeviceMap.find(device_id);
+            if (it == alexaDeviceMap.end()) {
+                return;
+            }
+            handleAlexaCommand(*it->second, state, value, rgb);
         });
     }
 
-    if (alexaPower) {
-        applyColor(lastState.red, lastState.green, lastState.blue, lastState.brightness);
-    } else {
-        ledController.sendColor(0, 0, 0, 0x10);
+    for (auto& instance : strips) {
+        StripInstance& strip = *instance;
+        if (strip.power) {
+            applyColor(strip, strip.lastState.red, strip.lastState.green, strip.lastState.blue, strip.lastState.brightness, false);
+        } else {
+            strip.control.sendColor(0, 0, 0, 0x10);
+        }
     }
 
     setupServer.begin();
@@ -603,15 +921,10 @@ void setup() {
 }
 
 void loop() {
-    if (!ledController.isConnected()) {
-        ledController.sendColor(0, 0, 0, 0x10);
-    }
-
     handleWifiReconnect();
 
     const bool wifiReady = (WiFi.status() == WL_CONNECTED);
-    const bool bleReady = ledController.isConnected();
-    const bool connected = wifiReady && bleReady;
+    const bool bleReady = anyStripConnected();
     if (!wifiReady) {
         updateIndicatorsForWifi(false);
         indicatorActive = false;
@@ -644,7 +957,10 @@ void loop() {
                       bleReady ? "OK" : "NO");
     }
 
-    updateEffect();
+    for (auto& instance : strips) {
+        updateEffect(*instance);
+    }
+    processAlexaCommands();
     if (!wifiSetupMode) {
         fauxmo.handle();
     } else {
