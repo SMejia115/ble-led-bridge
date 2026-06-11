@@ -336,6 +336,7 @@ static void saveWifiCredentials(const String& ssid, const String& password) {
     prefs.putString("ssid", ssid);
     prefs.putString("password", password);
     prefs.end();
+    Serial.printf("Guardadas credenciales WiFi: %s\n", ssid.c_str());
 }
 
 static void clearWifiCredentials() {
@@ -631,6 +632,7 @@ static bool startStationFromSavedCredentials() {
         return false;
     }
 
+    Serial.printf("Intentando conectar a WiFi: %s\n", creds.ssid.c_str());
     wifiSetupMode = false;
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(HOSTNAME);
