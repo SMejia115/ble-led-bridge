@@ -42,6 +42,9 @@ inline void BLEControl::begin() {
 }
 
 inline void BLEControl::configure(const std::string& address, const std::string& service_uuid, const std::string& characteristic_uuid) {
+    if (connected && client && device_address != address) {
+        disconnect();
+    }
     device_address = address;
     this->service_uuid = BLEUUID(service_uuid.c_str());
     this->characteristic_uuid = BLEUUID(characteristic_uuid.c_str());
